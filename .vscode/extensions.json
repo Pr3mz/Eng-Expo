@@ -1,7 +1,13 @@
 {
-  "recommendations": [
-    "platformio.platformio-ide",
-    "ms-python.python",
-    "ms-python.vscode-pylance"
-  ]
+    // See http://go.microsoft.com/fwlink/?LinkId=827846
+    // for the documentation about the extensions.json format
+    "recommendations": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "platformio.platformio-ide"
+    ],
+    "unwantedRecommendations": [
+        "ms-vscode.cpptools-extension-pack",
+        "pioarduino.pioarduino-ide"
+    ]
 }

@@ -1,0 +1,2 @@
+{"type":"entity","name":"ESP32_Board","entityType":"HARDWARE","observations":["Main microcontroller is ESP32-DevKitC using espressif32 platform and arduino framework."]}
+{"type":"entity","name":"TFT_Display","entityType":"HARDWARE","observations":["ST7789 240x240 TFT (SPI: MOSI=23, SCLK=18, CS=5, DC=2, RST=4)."]}

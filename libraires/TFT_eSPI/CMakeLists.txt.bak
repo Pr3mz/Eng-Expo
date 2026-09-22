@@ -1,0 +1,9 @@
+
+if(COMMAND idf_component_register)
+    idf_component_register(SRCS "TFT_eSPI.cpp"
+                        INCLUDE_DIRS "."
+                        PRIV_REQUIRES arduino)
+else()
+    add_library(TFT_eSPI STATIC "TFT_eSPI.cpp")
+    target_include_directories(TFT_eSPI PUBLIC ".")
+endif()

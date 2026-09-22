@@ -3,15 +3,7 @@ import mediapipe as mp
 import socket
 import time
 import threading
-from PIL import Image
-import io
-import os
-
-try:
-    from google import genai
-except ImportError:
-    genai = None
-    print("WARNING: google-genai is not installed. Gemini AI features will be disabled.")
+import sys
 
 # ==========================================
 #               CONFIGURATION
@@ -24,7 +16,6 @@ CONFIG = {
     "FPS_CAP_DELAY": 0.033,  # ~30 FPS
     "ARM_DEBOUNCE_SEC": 1.0,
     "MP_CONFIDENCE": 0.7,
-    "GEMINI_MODEL": "gemini-3.8-flash"
 }
 # ==========================================
 
@@ -64,8 +55,14 @@ class TelemetryReceiver:
 class VideoStream:
     def __init__(self, src=0):
         self.cap = None
-        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-        indices = [src] if src != 0 else [0, ]
+        if sys.platform == "darwin":
+            backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
+        elif sys.platform == "win32":
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        else:
+            backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
+            
+        indices = [src] if src != 0 else [0, 1]
 
         for backend in backends:
             for idx in indices:
@@ -101,7 +98,8 @@ class VideoStream:
 
     def stop(self):
         self.stopped = True
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
 
 # ------------------------------------------
 #           GESTURE LOGIC
@@ -157,39 +155,6 @@ def map_gestures(left_count, right_count, last_arm_time):
     return cmd, label_text, new_arm_time
 
 # ------------------------------------------
-#           GEMINI API INTEGRATION
-# ------------------------------------------
-gemini_client = None
-if genai is not None:
-    # Requires GEMINI_API_KEY environment variable to be set
-    try:
-        gemini_client = genai.Client()
-    except Exception as e:
-        print(f"Failed to initialize Gemini Client: {e}")
-        gemini_client = None
-
-def analyze_frame_with_gemini(frame_bgr):
-    if not gemini_client:
-        print("\n[GEMINI] Cannot analyze. Client not initialized or google-genai missing.")
-        return
-
-    print("\n[GEMINI] Sending frame for analysis...")
-    try:
-        # Convert OpenCV BGR to RGB and then to PIL Image
-        rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb_frame)
-        
-        prompt = "Describe what the user is holding or showing to the camera in this frame. If there is text, read it clearly."
-        
-        response = gemini_client.interactions.create(
-            model=CONFIG["GEMINI_MODEL"],
-            input=[prompt, pil_img]
-        )
-        print(f"\n[GEMINI AI RESPONSE]\n{response.output_text}\n" + "-"*40)
-    except Exception as e:
-        print(f"\n[GEMINI] Error during analysis: {e}")
-
-# ------------------------------------------
 #           MAIN LOOP
 # ------------------------------------------
 def main():
@@ -217,7 +182,7 @@ def main():
     arm_debounce_time = 0
     last_udp_time = 0
     print("UDP Telemetry Active. Zero-Lag Mode.")
-    print("CONTROLS: Press 'q' to quit, 'g' to send frame to Gemini AI.")
+    print("CONTROLS: Press 'q' to quit.")
 
     while True:
         ret, frame = vs.read()
@@ -263,9 +228,6 @@ def main():
         if key == ord('q'):
             print("Exiting...")
             break
-        elif key == ord('g'):
-            # Run Gemini analysis in a background thread so the camera feed doesn't freeze
-            threading.Thread(target=analyze_frame_with_gemini, args=(frame.copy(),), daemon=True).start()
 
     vs.stop()
     tx_sock.close()
@@ -273,4 +235,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -25,7 +25,11 @@
 #define MOTOR_UPDATE_MS 10
 // ==========================================
 
-void servoWrite(int pin, int angle)
+// LEDC Channels for Servos (Avoid 0-3 used by InEngMotor)
+#define LEFT_ARM_CH 4
+#define RIGHT_ARM_CH 5
+
+void servoWrite(int channel, int angle)
 {
     // Map Servo pulse and angle
     int pulseWidth = map(angle, 0, 180, 500, 2500);
@@ -33,8 +37,8 @@ void servoWrite(int pin, int angle)
     // Calculate Duty Cycle (20000UL = 1000000 / 50Hz)
     uint32_t duty = (pulseWidth * 65535UL) / 20000UL;
 
-    // Set the servo angle
-    ledcWrite(pin, duty);
+    // Set the servo angle via LEDC channel
+    ledcWrite(channel, duty);
 }
 
 // --- Globals ---
@@ -75,10 +79,16 @@ void setup()
 
     // 2. Initialize Motors and Servos
     inengmotor.begin();
-    ledcAttach(PIN_LEFT_ARM, SERVO_FREQ_HZ, SERVO_RES);
-    ledcAttach(PIN_RIGHT_ARM, SERVO_FREQ_HZ, SERVO_RES);
-    servoWrite(PIN_LEFT_ARM, 180);
-    servoWrite(PIN_RIGHT_ARM, 180);
+
+    // Core 2.x: ledcSetup(channel, freq, resolution) + ledcAttachPin(pin, channel)
+    ledcSetup(LEFT_ARM_CH, SERVO_FREQ_HZ, SERVO_RES);
+    ledcAttachPin(PIN_LEFT_ARM, LEFT_ARM_CH);
+
+    ledcSetup(RIGHT_ARM_CH, SERVO_FREQ_HZ, SERVO_RES);
+    ledcAttachPin(PIN_RIGHT_ARM, RIGHT_ARM_CH);
+
+    servoWrite(LEFT_ARM_CH, 180);
+    servoWrite(RIGHT_ARM_CH, 180);
 
     // 4. Initialize Wi-Fi
     tft.fillScreen(TFT_BLACK);
@@ -161,15 +171,15 @@ void processUDPCommands()
             targetRightSpeed = 0;
             currentStatus = "UDP STOP";
             break;
-        case 'Q':
-            leftArmState = !leftArmState;
-            servoWrite(PIN_LEFT_ARM, leftArmState ? 0 : 180);
-            currentStatus = "L-ARM TOGGLED";
+        case 'O':
+            leftArmState = false;
+            servoWrite(LEFT_ARM_CH, 180); // Open
+            currentStatus = "L-ARM OPEN (180)";
             break;
-        case 'E':
-            rightArmState = !rightArmState;
-            servoWrite(PIN_RIGHT_ARM, rightArmState ? 0 : 180);
-            currentStatus = "R-ARM TOGGLED";
+        case 'C':
+            leftArmState = true;
+            servoWrite(LEFT_ARM_CH, 0); // Close
+            currentStatus = "L-ARM CLOSED (0)";
             break;
         }
     }

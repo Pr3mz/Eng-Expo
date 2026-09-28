@@ -9,6 +9,7 @@
             "name": "PlatformIO",
             "includePath": [
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/src",
+                "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/InEngMotor/src",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/.pio/libdeps/esp32dev/ESP32Servo/src",
@@ -248,13 +249,13 @@
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
-                "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 ""
             ],
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/src",
+                    "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/InEngMotor/src",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/.pio/libdeps/esp32dev/ESP32Servo/src",
@@ -494,7 +495,6 @@
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
-                    "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     ""
                 ]
             },

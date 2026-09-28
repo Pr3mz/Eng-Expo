@@ -19,7 +19,7 @@ CONFIG = {
     "CAMERA_INDEX": 0,
     "FPS_CAP_DELAY": 0.033,  # ~30 FPS
     "ARM_DEBOUNCE_SEC": 1.0,
-    "MP_CONFIDENCE": 0.7
+    "MP_CONFIDENCE": 0.8
 }
 # ==========================================
 

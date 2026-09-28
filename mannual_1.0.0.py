@@ -100,19 +100,28 @@ def map_gestures(left_count, right_count, last_arm_time):
     elif left_count == 0 and right_count == 0:
         cmd, label_text = 'S', "STOP (Fists)"
         
-    # 2. Single-Hand Pivot & Arm Commands
+    # 2. Single-Hand Pivot & Servo Commands
     else:
         if left_count == 1:   
             cmd, label_text = 'L', "LEFT PIVOT (Left: 1)"
         elif right_count == 1: 
             cmd, label_text = 'R', "RIGHT PIVOT (Right: 1)"
             
-        elif left_count == 2 or right_count == 2:
+        # LEFT hand 4 fingers up → CLOSE servo 19
+        elif left_count == 4:
             if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                cmd, label_text = 'G', "SMART GRIP"
+                cmd, label_text = 'C', "SERVO 19 CLOSE (Left: 4)"
                 new_arm_time = time.time()
             else:
-                cmd, label_text = 'S', "STOP (Grip Debounce)"
+                cmd, label_text = 'S', "STOP (Debounce)"
+                
+        # RIGHT hand 4 fingers up → OPEN servo 19
+        elif right_count == 4:
+            if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
+                cmd, label_text = 'O', "SERVO 19 OPEN (Right: 4)"
+                new_arm_time = time.time()
+            else:
+                cmd, label_text = 'S', "STOP (Debounce)"
                 
     return cmd, label_text, new_arm_time
 

@@ -6,7 +6,7 @@
 // ==========================================
 //               CONFIGURATION
 // ==========================================
-const char *ssid = "Pr3mz_2.4G";
+const char *ssid = "Premwei";
 const char *password = "Premzaza0967";
 
 const int UDP_PORT = 4210;

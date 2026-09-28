@@ -7,64 +7,30 @@ from PIL import Image
 import io
 import os
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
-    print("WARNING: google-genai is not installed. Gemini AI features will be disabled.")
+
 
 # ==========================================
 #               CONFIGURATION
 # ==========================================
 CONFIG = {
-    "ESP32_IP": "192.168.1.128",
+    "ESP32_IP": "10.218.230.31",
     "UDP_PORT": 4210,
     "TELEMETRY_PORT": 4211,
     "CAMERA_INDEX": 0,
     "FPS_CAP_DELAY": 0.033,  # ~30 FPS
     "ARM_DEBOUNCE_SEC": 1.0,
-    "MP_CONFIDENCE": 0.7,
-    "GEMINI_MODEL": "gemini-3.8-flash"
+    "MP_CONFIDENCE": 0.7
 }
 # ==========================================
 
-# ------------------------------------------
-#           TELEMETRY RECEIVER
-# ------------------------------------------
-class TelemetryReceiver:
-    def __init__(self, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("0.0.0.0", port))
-        self.sock.setblocking(False)
-        self.huskylens_data = "Waiting for Robot..."
-        
-        if hasattr(socket, 'SIO_UDP_CONNRESET'):
-            try:
-                self.sock.ioctl(socket.SIO_UDP_CONNRESET, False)
-            except Exception:
-                pass
-                
-        threading.Thread(target=self._listen, daemon=True).start()
 
-    def _listen(self):
-        while True:
-            try:
-                data, _ = self.sock.recvfrom(1024)
-                msg = data.decode('utf-8', errors='ignore').strip()
-                if msg.startswith("HL|"):
-                    self.huskylens_data = msg.replace("HL|", "")
-            except (BlockingIOError, socket.error):
-                time.sleep(0.01)
-            except Exception:
-                time.sleep(0.01)
-
-# ------------------------------------------
-#           CAMERA STREAM
-# ------------------------------------------
 class VideoStream:
     def __init__(self, src=0):
         self.cap = None
-        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        backends = []
+        if hasattr(cv2, 'CAP_DSHOW'): backends.append(cv2.CAP_DSHOW)
+        if hasattr(cv2, 'CAP_MSMF'): backends.append(cv2.CAP_MSMF)
+        backends.append(cv2.CAP_ANY)
         indices = [src] if src != 0 else [0, ]
 
         for backend in backends:
@@ -110,16 +76,17 @@ def count_fingers(hand_landmarks, hand_label):
     fingers = 0
     # Thumb
     if hand_label == "Right":
-        if hand_landmarks.landmark[4].x < hand_landmarks.landmark[3].x: fingers += 1
+        if hand_landmarks[4].x < hand_landmarks[3].x: fingers += 1
     else:
-        if hand_landmarks.landmark[4].x > hand_landmarks.landmark[3].x: fingers += 1
+        if hand_landmarks[4].x > hand_landmarks[3].x: fingers += 1
         
     # Index, Middle, Ring, Pinky
     for tip in [8, 12, 16, 20]:
-        if hand_landmarks.landmark[tip].y < hand_landmarks.landmark[tip - 2].y:
+        if hand_landmarks[tip].y < hand_landmarks[tip - 2].y:
             fingers += 1
             
     return fingers
+
 
 def map_gestures(left_count, right_count, last_arm_time):
     cmd, label_text = 'S', "STOP"
@@ -140,54 +107,16 @@ def map_gestures(left_count, right_count, last_arm_time):
         elif right_count == 1: 
             cmd, label_text = 'R', "RIGHT PIVOT (Right: 1)"
             
-        elif left_count == 2:
+        elif left_count == 2 or right_count == 2:
             if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                cmd, label_text = 'Q', "TOGGLE LEFT ARM"
+                cmd, label_text = 'G', "SMART GRIP"
                 new_arm_time = time.time()
             else:
-                cmd, label_text = 'S', "STOP (L-Arm Debounce)"
-                
-        elif right_count == 2:
-            if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                cmd, label_text = 'E', "TOGGLE RIGHT ARM"
-                new_arm_time = time.time()
-            else:
-                cmd, label_text = 'S', "STOP (R-Arm Debounce)"
+                cmd, label_text = 'S', "STOP (Grip Debounce)"
                 
     return cmd, label_text, new_arm_time
 
-# ------------------------------------------
-#           GEMINI API INTEGRATION
-# ------------------------------------------
-gemini_client = None
-if genai is not None:
-    # Requires GEMINI_API_KEY environment variable to be set
-    try:
-        gemini_client = genai.Client()
-    except Exception as e:
-        print(f"Failed to initialize Gemini Client: {e}")
-        gemini_client = None
 
-def analyze_frame_with_gemini(frame_bgr):
-    if not gemini_client:
-        print("\n[GEMINI] Cannot analyze. Client not initialized or google-genai missing.")
-        return
-
-    print("\n[GEMINI] Sending frame for analysis...")
-    try:
-        # Convert OpenCV BGR to RGB and then to PIL Image
-        rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb_frame)
-        
-        prompt = "Describe what the user is holding or showing to the camera in this frame. If there is text, read it clearly."
-        
-        response = gemini_client.interactions.create(
-            model=CONFIG["GEMINI_MODEL"],
-            input=[prompt, pil_img]
-        )
-        print(f"\n[GEMINI AI RESPONSE]\n{response.output_text}\n" + "-"*40)
-    except Exception as e:
-        print(f"\n[GEMINI] Error during analysis: {e}")
 
 # ------------------------------------------
 #           MAIN LOOP
@@ -200,15 +129,23 @@ def main():
         try: tx_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
         except: pass
 
-    telemetry = TelemetryReceiver(CONFIG["TELEMETRY_PORT"])
+
     
-    mp_hands = mp.solutions.hands
-    mp_draw = mp.solutions.drawing_utils
-    hands = mp_hands.Hands(
-        max_num_hands=2, 
-        min_detection_confidence=CONFIG["MP_CONFIDENCE"], 
+    mp_hands = mp.tasks.vision
+    BaseOptions = mp.tasks.BaseOptions
+    HandLandmarker = mp_hands.HandLandmarker
+    HandLandmarkerOptions = mp_hands.HandLandmarkerOptions
+    VisionRunningMode = mp_hands.RunningMode
+
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path='hand_landmarker.task'),
+        running_mode=VisionRunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=CONFIG["MP_CONFIDENCE"],
+        min_hand_presence_confidence=CONFIG["MP_CONFIDENCE"],
         min_tracking_confidence=CONFIG["MP_CONFIDENCE"]
     )
+    hands = HandLandmarker.create_from_options(options)
 
     print("Starting Camera...")
     vs = VideoStream(src=CONFIG["CAMERA_INDEX"]).start()
@@ -217,7 +154,10 @@ def main():
     arm_debounce_time = 0
     last_udp_time = 0
     print("UDP Telemetry Active. Zero-Lag Mode.")
-    print("CONTROLS: Press 'q' to quit, 'g' to send frame to Gemini AI.")
+    print("CONTROLS: Press 'q' to quit.")
+
+    # Time tracking for mediapipe VIDEO mode
+    start_time = time.time()
 
     while True:
         ret, frame = vs.read()
@@ -225,15 +165,32 @@ def main():
 
         frame = cv2.flip(frame, 1) 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = hands.process(rgb)
+        
+        current_ms = int((time.time() - start_time) * 1000)
+        # Avoid passing same timestamp or going backwards (MediaPipe requires strictly increasing timestamps)
+        if hasattr(vs, 'last_ts_ms') and current_ms <= vs.last_ts_ms:
+            current_ms = vs.last_ts_ms + 1
+        vs.last_ts_ms = current_ms
+        
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        res = hands.detect_for_video(mp_image, current_ms)
         
         left_count, right_count = 0, 0
 
-        if res.multi_hand_landmarks:
-            for idx, hand_landmarks in enumerate(res.multi_hand_landmarks):
-                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        if res.hand_landmarks:
+            for idx, hand_landmarks in enumerate(res.hand_landmarks):
+                # Manual landmark drawing
+                h, w, _ = frame.shape
+                for connection in mp.tasks.vision.HandLandmarksConnections.HAND_CONNECTIONS:
+                    start_idx, end_idx = connection.start, connection.end
+                    x1, y1 = int(hand_landmarks[start_idx].x * w), int(hand_landmarks[start_idx].y * h)
+                    x2, y2 = int(hand_landmarks[end_idx].x * w), int(hand_landmarks[end_idx].y * h)
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                for mark in hand_landmarks:
+                    x, y = int(mark.x * w), int(mark.y * h)
+                    cv2.circle(frame, (x, y), 4, (0, 0, 255), -1)
                 
-                mp_label = res.multi_handedness[idx].classification[0].label
+                mp_label = res.handedness[idx][0].category_name
                 actual_hand = "Right" if mp_label == "Left" else "Left"
                 
                 if actual_hand == "Left":
@@ -255,7 +212,6 @@ def main():
         # Draw HUD
         cv2.putText(frame, f"Command: {label_text}", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(frame, f"L-Fingers: {left_count} | R-Fingers: {right_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, f"Robot Vision: {telemetry.huskylens_data}", (10, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 
         cv2.imshow("CPE UDP HUD", frame)
 
@@ -263,9 +219,6 @@ def main():
         if key == ord('q'):
             print("Exiting...")
             break
-        elif key == ord('g'):
-            # Run Gemini analysis in a background thread so the camera feed doesn't freeze
-            threading.Thread(target=analyze_frame_with_gemini, args=(frame.copy(),), daemon=True).start()
 
     vs.stop()
     tx_sock.close()

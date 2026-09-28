@@ -164,10 +164,12 @@
  .pio/libdeps/esp32dev/TFT_eSPI/Fonts/Font16.c \
  .pio/libdeps/esp32dev/TFT_eSPI/Fonts/Font32rle.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Fonts/Font32rle.c \
+ .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Touch.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Button.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Sprite.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Processors/TFT_eSPI_ESP32.c \
  .pio/libdeps/esp32dev/TFT_eSPI/TFT_Drivers/ST7789_Init.h \
  .pio/libdeps/esp32dev/TFT_eSPI/TFT_Drivers/ST7789_Rotation.h \
+ .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Touch.cpp \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Button.cpp \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Sprite.cpp

@@ -11,8 +11,6 @@
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/src",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/InEngMotor/src",
-                "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/HUSKYLENS",
-                "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/.pio/libdeps/esp32dev/ESP32Servo/src",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/.pio/libdeps/esp32dev/TFT_eSPI",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
@@ -216,6 +214,7 @@
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/cores/esp32",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/variants/esp32",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/ESP32Servo/src",
+                "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/HUSKYLENS",
                 "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/TFT_eSPI",
                 "/Users/prem/Documents/Arduino/libraries/ESP32Servo/src",
                 "/Users/prem/Documents/Arduino/libraries/HUSKYLENS",
@@ -249,6 +248,7 @@
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                 "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
+                "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 ""
             ],
             "browse": {
@@ -257,8 +257,6 @@
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/src",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/InEngMotor/src",
-                    "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/HUSKYLENS",
-                    "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/.pio/libdeps/esp32dev/ESP32Servo/src",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/.pio/libdeps/esp32dev/TFT_eSPI",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
@@ -462,6 +460,7 @@
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/cores/esp32",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/variants/esp32",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/ESP32Servo/src",
+                    "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/HUSKYLENS",
                     "/Users/prem/Documents/Eng-Expo/Eng-Expo-1/libraires/TFT_eSPI",
                     "/Users/prem/Documents/Arduino/libraries/ESP32Servo/src",
                     "/Users/prem/Documents/Arduino/libraries/HUSKYLENS",
@@ -495,12 +494,14 @@
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                     "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
+                    "/Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     ""
                 ]
             },
             "defines": [
                 "PLATFORMIO=60200",
                 "ARDUINO_ESP32_DEV",
+                "TOUCH_CS=-1",
                 "USER_SETUP_LOADED=1",
                 "ST7789_DRIVER=1",
                 "TFT_WIDTH=240",

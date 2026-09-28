@@ -1,4 +1,4 @@
-.pio/build/esp32dev/src/main_1.0.0.ino.cpp.o: src/main_1.0.0.ino.cpp \
+.pio/build/esp32dev/src/auto_1.1.0.ino.cpp.o: src/auto_1.1.0.ino.cpp \
  /Users/prem/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  /Users/prem/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  /Users/prem/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/freertos/FreeRTOS.h \
@@ -223,8 +223,7 @@
  .pio/libdeps/esp32dev/TFT_eSPI/Fonts/Font16.c \
  .pio/libdeps/esp32dev/TFT_eSPI/Fonts/Font32rle.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Fonts/Font32rle.c \
+ .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Touch.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Button.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Sprite.h \
- /Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.h \
- /Users/prem/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
  libraires/InEngMotor/src/InEngMotor.h

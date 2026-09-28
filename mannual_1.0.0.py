@@ -88,9 +88,11 @@ def count_fingers(hand_landmarks, hand_label):
     return fingers
 
 
-def map_gestures(left_count, right_count, last_arm_time):
+def map_gestures(left_count, right_count, last_arm_time, left_servo_gesture_active):
     cmd, label_text = 'S', "STOP"
     new_arm_time = last_arm_time
+    single_hand_three_fingers = (left_count == 3) != (right_count == 3)
+    new_left_servo_gesture_active = single_hand_three_fingers
     
     # 1. Dual-Hand Drive Commands
     if left_count == 5 and right_count == 5:
@@ -102,7 +104,12 @@ def map_gestures(left_count, right_count, last_arm_time):
         
     # 2. Single-Hand Pivot & Arm Commands
     else:
-        if left_count == 1:   
+        if single_hand_three_fingers:
+            if not left_servo_gesture_active:
+                cmd, label_text = 'Q', "LEFT SERVO (GPIO 19)"
+            else:
+                cmd, label_text = 'S', "LEFT SERVO (GPIO 19)"
+        elif left_count == 1:
             cmd, label_text = 'L', "LEFT PIVOT (Left: 1)"
         elif right_count == 1: 
             cmd, label_text = 'R', "RIGHT PIVOT (Right: 1)"
@@ -114,7 +121,7 @@ def map_gestures(left_count, right_count, last_arm_time):
             else:
                 cmd, label_text = 'S', "STOP (Grip Debounce)"
                 
-    return cmd, label_text, new_arm_time
+    return cmd, label_text, new_arm_time, new_left_servo_gesture_active
 
 
 
@@ -152,6 +159,8 @@ def main():
     time.sleep(1.0) 
 
     arm_debounce_time = 0
+    left_servo_gesture_active = False
+    left_servo_closed = False
     last_udp_time = 0
     print("UDP Telemetry Active. Zero-Lag Mode.")
     print("CONTROLS: Press 'q' to quit.")
@@ -199,12 +208,16 @@ def main():
                     right_count = count_fingers(hand_landmarks, "Right")
 
         # Map gestures to commands
-        cmd, label_text, arm_debounce_time = map_gestures(left_count, right_count, arm_debounce_time)
+        cmd, label_text, arm_debounce_time, left_servo_gesture_active = map_gestures(
+            left_count, right_count, arm_debounce_time, left_servo_gesture_active
+        )
 
         # Send UDP Packet
         if time.time() - last_udp_time > CONFIG["FPS_CAP_DELAY"]:
             try:
                 tx_sock.sendto(cmd.encode(), (CONFIG["ESP32_IP"], CONFIG["UDP_PORT"]))
+                if cmd == 'Q':
+                    left_servo_closed = not left_servo_closed
             except (socket.error, OSError):
                 pass 
             last_udp_time = time.time()
@@ -212,6 +225,10 @@ def main():
         # Draw HUD
         cv2.putText(frame, f"Command: {label_text}", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(frame, f"L-Fingers: {left_count} | R-Fingers: {right_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        servo_status = "GPIO 19: CLOSED" if left_servo_closed else "GPIO 19: OPEN"
+        servo_color = (0, 0, 255) if left_servo_closed else (0, 200, 0)
+        cv2.rectangle(frame, (10, 88), (260, 120), servo_color, -1)
+        cv2.putText(frame, servo_status, (18, 111), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
         cv2.imshow("CPE UDP HUD", frame)
 
@@ -226,4 +243,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

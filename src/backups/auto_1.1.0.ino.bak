@@ -33,6 +33,7 @@ float currentLeftSpeed = 0.0;
 float currentRightSpeed = 0.0;
 int targetLeftSpeed = 0;
 int targetRightSpeed = 0;
+bool leftArmClosed = false;
 
 unsigned long lastMotorUpdate = 0;
 unsigned long lastUdpTime = 0;
@@ -159,6 +160,13 @@ void loop()
       // OPEN GRIPPER
       servoWrite(LEFT_ARM_CH, 0);
       servoWrite(RIGHT_ARM_CH, 0);
+    }
+    else if (cmd == 'Q')
+    {
+      targetLeftSpeed = 0;
+      targetRightSpeed = 0;
+      leftArmClosed = !leftArmClosed;
+      servoWrite(LEFT_ARM_CH, leftArmClosed ? 180 : 0);
     }
   }
 

@@ -226,6 +226,4 @@
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Touch.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Button.h \
  .pio/libdeps/esp32dev/TFT_eSPI/Extensions/Sprite.h \
- /Users/prem/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.h \
- /Users/prem/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
  libraires/InEngMotor/src/InEngMotor.h

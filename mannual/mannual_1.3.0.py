@@ -1,296 +1,239 @@
+# mannual_1.3.0.py — MediaPipe Hand Gesture Controller
+# Sends single-char UDP commands to ESP32 rover.
+# F=Forward  B=Reverse  L=Left  R=Right  S=Stop  C=Close Servo  O=Open Servo
+
 import cv2
 import mediapipe as mp
 import socket
 import time
-import threading
-from PIL import Image
-import io
-import os
-
-
 
 # ==========================================
 #               CONFIGURATION
 # ==========================================
 CONFIG = {
-    "ESP32_IP": "10.218.230.31",
-    "UDP_PORT": 4210,
-    "TELEMETRY_PORT": 4211,
-    "CAMERA_INDEX": 0,
-    "FPS_CAP_DELAY": 0.033,  # ~30 FPS
-    "ARM_DEBOUNCE_SEC": 1.0,
-    "MP_CONFIDENCE": 0.8
+    "ESP32_IP":         "10.218.230.31",
+    "UDP_PORT":         4210,
+    "CAMERA_INDEX":     0,
+    "FPS_CAP_DELAY":    0.033,    # ~30 Hz UDP send rate
+    "ARM_DEBOUNCE_SEC": 1.0,      # Seconds between servo commands
+    "MP_CONFIDENCE":    0.8,
 }
+
 # ==========================================
-
-
+#               VIDEO STREAM
+# ==========================================
 class VideoStream:
+    """Threaded camera capture to prevent frame lag."""
     def __init__(self, src=0):
-        self.cap = None
-        backends = []
-        if hasattr(cv2, 'CAP_DSHOW'): backends.append(cv2.CAP_DSHOW)
-        if hasattr(cv2, 'CAP_MSMF'): backends.append(cv2.CAP_MSMF)
-        backends.append(cv2.CAP_ANY)
-        indices = [src] if src != 0 else [0, ]
-
-        for backend in backends:
-            for idx in indices:
-                cap = cv2.VideoCapture(idx, backend)
-                if cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    for _ in range(3):
-                        ret, frame = cap.read()
-                        if ret and frame is not None:
-                            self.cap = cap
-                            break
-                    if self.cap is not None: break
-                cap.release()
-            if self.cap is not None: break
-
-        if self.cap is None:
-            raise RuntimeError("ERROR: Unable to open PC Camera!")
-
+        self.cap = cv2.VideoCapture(src)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.ret, self.frame = self.cap.read()
-        self.stopped = False
+        self.last_ts_ms = 0
+        import threading
+        self._lock = threading.Lock()
+        self._stopped = False
+        threading.Thread(target=self._loop, daemon=True).start()
 
-    def start(self):
-        threading.Thread(target=self.update, daemon=True).start()
-        return self
-
-    def update(self):
-        while not self.stopped:
-            self.ret, self.frame = self.cap.read()
+    def _loop(self):
+        while not self._stopped:
+            ret, frame = self.cap.read()
+            with self._lock:
+                self.ret, self.frame = ret, frame
 
     def read(self):
-        return self.ret, self.frame
+        import threading
+        with self._lock:
+            return self.ret, (self.frame.copy() if self.frame is not None else None)
 
     def stop(self):
-        self.stopped = True
+        self._stopped = True
         self.cap.release()
 
-# ------------------------------------------
-#           GESTURE LOGIC
-# ------------------------------------------
-def detect_fingers(hand_landmarks, hand_label):
-    """
-    Returns a dict of which fingers are up: {thumb, index, middle, ring, pinky}
-    """
+# ==========================================
+#            GESTURE DETECTION
+# ==========================================
+def detect_fingers(landmarks, hand_side):
+    """Return dict of which fingers are up for the given hand."""
+    TIP = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
+    PIP = {"thumb": 3, "index": 7, "middle": 11, "ring": 15, "pinky": 19}
+
     fingers = {}
-    
-    # Thumb: compare tip.x vs IP.x (direction depends on hand)
-    if hand_label == "Right":
-        fingers["thumb"] = hand_landmarks[4].x < hand_landmarks[3].x
-    else:
-        fingers["thumb"] = hand_landmarks[4].x > hand_landmarks[3].x
-    
-    # Index, Middle, Ring, Pinky: tip.y < PIP.y means finger is up
-    fingers["index"]  = hand_landmarks[8].y  < hand_landmarks[6].y
-    fingers["middle"] = hand_landmarks[12].y < hand_landmarks[10].y
-    fingers["ring"]   = hand_landmarks[16].y < hand_landmarks[14].y
-    fingers["pinky"]  = hand_landmarks[20].y < hand_landmarks[18].y
-    
+    for name, tip_id in TIP.items():
+        tip = landmarks[tip_id]
+        pip = landmarks[PIP[name]]
+        if name == "thumb":
+            # Thumb: compare x-axis (flipped for left/right hand)
+            if hand_side == "Right":
+                fingers["thumb"] = tip.x < pip.x
+            else:
+                fingers["thumb"] = tip.x > pip.x
+        else:
+            fingers[name] = tip.y < pip.y
     return fingers
 
-def fingers_up_count(f):
-    """Count total fingers up from a finger dict."""
-    return sum(f.values())
-
-def is_thumb_only(f):
-    """Only thumb is up."""
-    return f["thumb"] and not f["index"] and not f["middle"] and not f["ring"] and not f["pinky"]
-
+# Gesture predicates
 def is_L_shape(f):
-    """Thumb + Index up, others down."""
+    """Thumb + Index only."""
     return f["thumb"] and f["index"] and not f["middle"] and not f["ring"] and not f["pinky"]
 
 def is_imp_combo(f):
-    """Index + Middle + Pinky up (ring & thumb can be anything)."""
+    """Index + Middle + Pinky (no ring)."""
     return f["index"] and f["middle"] and f["pinky"] and not f["ring"]
 
 def is_four_fingers(f):
-    """4 fingers up (index+middle+ring+pinky), thumb down."""
+    """Index + Middle + Ring + Pinky, thumb down."""
     return not f["thumb"] and f["index"] and f["middle"] and f["ring"] and f["pinky"]
 
 def is_five(f):
     """All 5 fingers up."""
     return all(f.values())
 
-
+# ==========================================
+#            COMMAND MAPPING
+# ==========================================
 def map_gestures(left_fingers, right_fingers, last_arm_time):
-    cmd, label_text = 'S', "STOP"
+    """Map hand gestures to a single UDP command character."""
+    cmd, label = 'S', "STOP"
     new_arm_time = last_arm_time
-    
-    left_active = left_fingers is not None
-    right_active = right_fingers is not None
-    
-    # --- TWO-HAND GESTURES (highest priority) ---
-    if left_active and right_active:
-        # 5 + 5 → FORWARD
+    L, R = left_fingers is not None, right_fingers is not None
+
+    if L and R:
         if is_five(left_fingers) and is_five(right_fingers):
-            cmd, label_text = 'F', "FORWARD (5+5)"
-        
-        # Index+Middle+Pinky on both → REVERSE
+            cmd, label = 'F', "FORWARD (5+5)"
         elif is_imp_combo(left_fingers) and is_imp_combo(right_fingers):
-            cmd, label_text = 'B', "REVERSE (I+M+P)"
-        
-        # If only one hand has a gesture, fall through to single-hand
-        else:
-            # Check left hand single gestures
-            if is_four_fingers(left_fingers):
-                cmd, label_text = 'L', "LEFT PIVOT (4 fingers L)"
-            elif is_four_fingers(right_fingers):
-                cmd, label_text = 'R', "RIGHT PIVOT (4 fingers R)"
-            elif is_L_shape(left_fingers):
-                if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                    cmd, label_text = 'O', "SERVO 19 OPEN (L-shape L)"
-                    new_arm_time = time.time()
-            elif is_L_shape(right_fingers):
-                if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                    cmd, label_text = 'C', "SERVO 19 CLOSE (L-shape R)"
-                    new_arm_time = time.time()
-    
-    # --- SINGLE-HAND GESTURES ---
-    elif left_active:
-        if is_five(left_fingers):
-            cmd, label_text = 'S', "STOP (5 fingers)"
+            cmd, label = 'B', "REVERSE (I+M+P)"
         elif is_four_fingers(left_fingers):
-            cmd, label_text = 'L', "LEFT PIVOT (4 fingers L)"
+            cmd, label = 'L', "LEFT (4 fingers L)"
+        elif is_four_fingers(right_fingers):
+            cmd, label = 'R', "RIGHT (4 fingers R)"
         elif is_L_shape(left_fingers):
             if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                cmd, label_text = 'O', "SERVO 19 OPEN (L-shape L)"
+                cmd, label = 'O', "OPEN SERVO (L-shape L)"
                 new_arm_time = time.time()
-    
-    elif right_active:
-        if is_five(right_fingers):
-            cmd, label_text = 'S', "STOP (5 fingers)"
-        elif is_four_fingers(right_fingers):
-            cmd, label_text = 'R', "RIGHT PIVOT (4 fingers R)"
         elif is_L_shape(right_fingers):
             if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
-                cmd, label_text = 'C', "SERVO 19 CLOSE (L-shape R)"
+                cmd, label = 'C', "CLOSE SERVO (L-shape R)"
                 new_arm_time = time.time()
-    
-    return cmd, label_text, new_arm_time
 
+    elif L:
+        if is_five(left_fingers):
+            cmd, label = 'S', "STOP (5 L)"
+        elif is_four_fingers(left_fingers):
+            cmd, label = 'L', "LEFT (4 fingers L)"
+        elif is_L_shape(left_fingers):
+            if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
+                cmd, label = 'O', "OPEN SERVO (L-shape L)"
+                new_arm_time = time.time()
 
+    elif R:
+        if is_five(right_fingers):
+            cmd, label = 'S', "STOP (5 R)"
+        elif is_four_fingers(right_fingers):
+            cmd, label = 'R', "RIGHT (4 fingers R)"
+        elif is_L_shape(right_fingers):
+            if time.time() - last_arm_time > CONFIG["ARM_DEBOUNCE_SEC"]:
+                cmd, label = 'C', "CLOSE SERVO (L-shape R)"
+                new_arm_time = time.time()
 
-# ------------------------------------------
-#           MAIN LOOP
-# ------------------------------------------
+    return cmd, label, new_arm_time
+
+# ==========================================
+#                   MAIN
+# ==========================================
 def main():
-    # Setup UDP Sender
     tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tx_sock.setblocking(False)
-    if hasattr(socket, 'SIO_UDP_CONNRESET'):
-        try: tx_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
-        except: pass
 
-
-    
-    mp_hands = mp.tasks.vision
-    BaseOptions = mp.tasks.BaseOptions
-    HandLandmarker = mp_hands.HandLandmarker
-    HandLandmarkerOptions = mp_hands.HandLandmarkerOptions
-    VisionRunningMode = mp_hands.RunningMode
-
-    options = HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path='hand_landmarker.task'),
-        running_mode=VisionRunningMode.VIDEO,
+    mp_vision = mp.tasks.vision
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path='hand_landmarker.task'),
+        running_mode=mp_vision.RunningMode.VIDEO,
         num_hands=2,
         min_hand_detection_confidence=CONFIG["MP_CONFIDENCE"],
         min_hand_presence_confidence=CONFIG["MP_CONFIDENCE"],
-        min_tracking_confidence=CONFIG["MP_CONFIDENCE"]
+        min_tracking_confidence=CONFIG["MP_CONFIDENCE"],
     )
-    hands = HandLandmarker.create_from_options(options)
+    hands = mp_vision.HandLandmarker.create_from_options(options)
 
-    print("Starting Camera...")
-    vs = VideoStream(src=CONFIG["CAMERA_INDEX"]).start()
-    time.sleep(1.0) 
+    print("Starting camera...")
+    vs = VideoStream(src=CONFIG["CAMERA_INDEX"])
+    time.sleep(1.0)
 
-    arm_debounce_time = 0
-    last_udp_time = 0
-    print("UDP Telemetry Active. Zero-Lag Mode.")
-    print("CONTROLS: Press 'q' to quit.")
-
-    # Time tracking for mediapipe VIDEO mode
+    arm_debounce_time = 0.0
+    last_udp_time = 0.0
     start_time = time.time()
+
+    print("Ready — press 'q' to quit.")
+    print("Gestures: 5+5=FWD  I+M+P=REV  4L=LEFT  4R=RIGHT  L-shape=SERVO")
 
     while True:
         ret, frame = vs.read()
-        if not ret or frame is None: continue
+        if not ret or frame is None:
+            continue
 
-        frame = cv2.flip(frame, 1) 
+        frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        current_ms = int((time.time() - start_time) * 1000)
-        # Avoid passing same timestamp or going backwards (MediaPipe requires strictly increasing timestamps)
-        if hasattr(vs, 'last_ts_ms') and current_ms <= vs.last_ts_ms:
-            current_ms = vs.last_ts_ms + 1
-        vs.last_ts_ms = current_ms
-        
+
+        # MediaPipe requires strictly increasing timestamps
+        ts_ms = int((time.time() - start_time) * 1000)
+        if ts_ms <= vs.last_ts_ms:
+            ts_ms = vs.last_ts_ms + 1
+        vs.last_ts_ms = ts_ms
+
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        res = hands.detect_for_video(mp_image, current_ms)
-        
-        left_fingers, right_fingers = None, None
+        res = hands.detect_for_video(mp_image, ts_ms)
+
+        left_fingers = right_fingers = None
+        h, w, _ = frame.shape
 
         if res.hand_landmarks:
-            for idx, hand_landmarks in enumerate(res.hand_landmarks):
-                # Manual landmark drawing
-                h, w, _ = frame.shape
-                for connection in mp.tasks.vision.HandLandmarksConnections.HAND_CONNECTIONS:
-                    start_idx, end_idx = connection.start, connection.end
-                    x1, y1 = int(hand_landmarks[start_idx].x * w), int(hand_landmarks[start_idx].y * h)
-                    x2, y2 = int(hand_landmarks[end_idx].x * w), int(hand_landmarks[end_idx].y * h)
+            for idx, landmarks in enumerate(res.hand_landmarks):
+                # Draw skeleton
+                for conn in mp_vision.HandLandmarksConnections.HAND_CONNECTIONS:
+                    x1 = int(landmarks[conn.start].x * w)
+                    y1 = int(landmarks[conn.start].y * h)
+                    x2 = int(landmarks[conn.end].x * w)
+                    y2 = int(landmarks[conn.end].y * h)
                     cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                for mark in hand_landmarks:
-                    x, y = int(mark.x * w), int(mark.y * h)
-                    cv2.circle(frame, (x, y), 4, (0, 0, 255), -1)
-                
+                for lm in landmarks:
+                    cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 4, (0, 0, 255), -1)
+
+                # MediaPipe returns mirrored labels — flip them
                 mp_label = res.handedness[idx][0].category_name
                 actual_hand = "Right" if mp_label == "Left" else "Left"
-                
+
                 if actual_hand == "Left" and left_fingers is None:
-                    left_fingers = detect_fingers(hand_landmarks, "Left")
+                    left_fingers = detect_fingers(landmarks, "Left")
                 elif actual_hand == "Right" and right_fingers is None:
-                    right_fingers = detect_fingers(hand_landmarks, "Right")
+                    right_fingers = detect_fingers(landmarks, "Right")
 
-        # Map gestures to commands
-        cmd, label_text, arm_debounce_time = map_gestures(left_fingers, right_fingers, arm_debounce_time)
+        cmd, label, arm_debounce_time = map_gestures(left_fingers, right_fingers, arm_debounce_time)
 
-        # Draw HUD
-        left_str = ""
-        if left_fingers:
-            up = [k[0].upper() for k, v in left_fingers.items() if v]
-            left_str = "+".join(up) if up else "Fist"
-        right_str = ""
-        if right_fingers:
-            up = [k[0].upper() for k, v in right_fingers.items() if v]
-            right_str = "+".join(up) if up else "Fist"
-
-        # Send UDP Packet
-        if time.time() - last_udp_time > CONFIG["FPS_CAP_DELAY"]:
+        # Send UDP at 30 Hz
+        now = time.time()
+        if now - last_udp_time > CONFIG["FPS_CAP_DELAY"]:
             try:
                 tx_sock.sendto(cmd.encode(), (CONFIG["ESP32_IP"], CONFIG["UDP_PORT"]))
             except (socket.error, OSError):
-                pass 
-            last_udp_time = time.time()
+                pass
+            last_udp_time = now
 
-        # Draw HUD
-        cv2.putText(frame, f"Command: {label_text}", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"L: [{left_str}] | R: [{right_str}]", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        # HUD
+        left_str  = "+".join(k[0].upper() for k, v in left_fingers.items()  if v) if left_fingers  else "—"
+        right_str = "+".join(k[0].upper() for k, v in right_fingers.items() if v) if right_fingers else "—"
+        cv2.putText(frame, f"CMD: {label}",                    (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(frame, f"L:[{left_str}]  R:[{right_str}]", (10, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.imshow("Manual Control", frame)
 
-        cv2.imshow("CPE UDP HUD", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            print("Exiting...")
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    tx_sock.sendto(b'S', (CONFIG["ESP32_IP"], CONFIG["UDP_PORT"]))
     vs.stop()
     tx_sock.close()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
-

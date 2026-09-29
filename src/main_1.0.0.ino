@@ -87,8 +87,9 @@ void setup()
     ledcSetup(RIGHT_ARM_CH, SERVO_FREQ_HZ, SERVO_RES);
     ledcAttachPin(PIN_RIGHT_ARM, RIGHT_ARM_CH);
 
-    servoWrite(LEFT_ARM_CH, 180);
-    servoWrite(RIGHT_ARM_CH, 180);
+    // Start in CLOSED state (0 degrees)
+    servoWrite(LEFT_ARM_CH, 0);
+    servoWrite(RIGHT_ARM_CH, 0);
 
     // 4. Initialize Wi-Fi
     tft.fillScreen(TFT_BLACK);

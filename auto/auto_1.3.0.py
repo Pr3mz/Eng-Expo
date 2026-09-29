@@ -94,8 +94,10 @@ def send_udp(cmd: str):
     if cmd != _last_cmd or (now - _last_cmd_time) > 0.03:
         try:
             sock.sendto(cmd.encode(), (ESP32_IP, UDP_PORT))
-        except Exception:
-            pass
+            if cmd != _last_cmd:
+                print(f"[UDP] Sent: {cmd}")
+        except Exception as e:
+            print(f"[UDP] Error: {e}")
         _last_cmd      = cmd
         _last_cmd_time = now
 
@@ -198,6 +200,7 @@ def inference_worker():
             roboflow_predictions  = scaled
             roboflow_gem_targets  = gems
             roboflow_drop_targets = drops
+            # print(f"[AI] Gems: {len(gems)} | Drops: {len(drops)}")
 
         except Exception as e:
             print(f"[AI] {e}")

@@ -39,7 +39,7 @@ WARP_W = 800
 WARP_H = 600
 ZONE_RADIUS_PX = 48
 ZONE_EXCLUSION_RADIUS_PX = 115
-ROBOT_EXCLUSION_RADIUS_PX = 80
+ROBOT_EXCLUSION_RADIUS_PX = 130 #80
 CRUISE_DRIVE_SPEED = 210
 # This rover did not move at PWM 90 or 145 on the floor. Slow the approach
 # with shorter pulses while keeping enough torque to start the wheels.

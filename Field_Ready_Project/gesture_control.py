@@ -1,29 +1,33 @@
 import cv2
 import time
+import mediapipe as mp
+import os
 
 class GestureController:
     def __init__(self):
-        import mediapipe as mp
-        self.mp_hands = mp.solutions.hands
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.7,
+        self.mp_vision = mp.tasks.vision
+        options = self.mp_vision.HandLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=os.path.join(os.path.dirname(__file__), 'hand_landmarker.task')),
+            running_mode=self.mp_vision.RunningMode.IMAGE,
+            num_hands=2,
+            min_hand_detection_confidence=0.7,
+            min_hand_presence_confidence=0.7,
             min_tracking_confidence=0.7
         )
+        self.hands = self.mp_vision.HandLandmarker.create_from_options(options)
         self.last_arm_time = 0
 
     def detect_fingers(self, landmarks, hand_side):
-        """Return dict of which fingers are up for the given hand using normalized landmarks."""
+        """Return dict of which fingers are up for the given hand."""
         TIP = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
         PIP = {"thumb": 3, "index": 7, "middle": 11, "ring": 15, "pinky": 19}
 
         fingers = {}
         for name, tip_id in TIP.items():
-            tip = landmarks.landmark[tip_id]
-            pip = landmarks.landmark[PIP[name]]
+            tip = landmarks[tip_id]
+            pip = landmarks[PIP[name]]
             if name == "thumb":
+                # Thumb: compare x-axis
                 if hand_side == "Right":
                     fingers["thumb"] = tip.x < pip.x
                 else:
@@ -40,24 +44,36 @@ class GestureController:
     def process_frame(self, frame, is_grabbed):
         """Processes frame, draws hands, and returns (cmd_char, new_is_grabbed) or None"""
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        res = self.hands.detect(mp_image)
         
         cmd = None
         new_is_grabbed = is_grabbed
         left_f = None
         right_f = None
 
-        if results.multi_hand_landmarks and results.multi_handedness:
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                self.mp_drawing.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
-                label = handedness.classification[0].label # Left or Right
-                
-                # MediaPipe returns mirrored labels by default for front-facing. 
-                # If camera is overhead and NOT flipped, we might need to adjust this.
-                if label == "Left":
-                    left_f = self.detect_fingers(hand_landmarks, "Left")
-                else:
-                    right_f = self.detect_fingers(hand_landmarks, "Right")
+        h, w, _ = frame.shape
+
+        if res.hand_landmarks:
+            for idx, landmarks in enumerate(res.hand_landmarks):
+                # Draw skeleton
+                for conn in self.mp_vision.HandLandmarksConnections.HAND_CONNECTIONS:
+                    x1 = int(landmarks[conn.start].x * w)
+                    y1 = int(landmarks[conn.start].y * h)
+                    x2 = int(landmarks[conn.end].x * w)
+                    y2 = int(landmarks[conn.end].y * h)
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                for lm in landmarks:
+                    cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 4, (0, 0, 255), -1)
+
+                mp_label = res.handedness[idx][0].category_name
+                # Note: overhead camera might not be mirrored like a selfie cam.
+                actual_hand = mp_label
+
+                if actual_hand == "Left" and left_f is None:
+                    left_f = self.detect_fingers(landmarks, "Left")
+                elif actual_hand == "Right" and right_f is None:
+                    right_f = self.detect_fingers(landmarks, "Right")
 
             L, R = left_f is not None, right_f is not None
             

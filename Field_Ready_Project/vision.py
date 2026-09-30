@@ -413,6 +413,12 @@ def detect_gems_roboflow(
         workspace_name=RF_WORKSPACE,
         workflow_id=RF_WORKFLOW,
         images={"image": small},
+        parameters={
+            "confidence": 0.4,
+            "iou_threshold": 0.3,
+            "class_agnostic_nms": False,
+            "max_detections": 1000
+        },
         use_cache=True,
     )
 

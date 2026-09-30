@@ -1,4 +1,4 @@
-"""Camera-guided six-color sorter for ExpoRedCrObot.
+"""Camera-guided six-color sorter for ARGOS.
 
 Auto mode requires a live camera, valid arena and zone calibration, a measured
 scale, a stable robot marker, a fresh ESP32 reply, and an explicit auto option.
@@ -127,7 +127,7 @@ def run_gripper_simulator(distance_px: float, radius_px: float) -> int:
         (465, 470, "gold"), (190, 430, "blue"), (180, 170, "lime"),
     ]
 
-    window = "ExpoRedCrObot | virtual gripper simulator"
+    window = "ARGOS | virtual gripper simulator"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window, width, height)
     distance_limit = max(400, int(math.ceil(distance_px)) + 10)
@@ -495,12 +495,12 @@ def acquire_single_instance() -> bool:
     kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
     kernel32.CloseHandle.restype = ctypes.c_bool
     ctypes.set_last_error(0)
-    handle = kernel32.CreateMutexW(None, False, "Local\\ExpoRedCrObot.CameraLoop")
+    handle = kernel32.CreateMutexW(None, False, "Local\\ARGOS.CameraLoop")
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         kernel32.CloseHandle(handle)
-        print("[SAFE] ExpoRedCrObot is already running; refusing a second camera/robot loop.")
+        print("[SAFE] ARGOS is already running; refusing a second camera/robot loop.")
         return False
 
     _INSTANCE_KERNEL32 = kernel32
@@ -585,7 +585,7 @@ def main():
     rf_future = None
     last_gems = []
 
-    window = "ExpoRedCrObot | overhead view"
+    window = "ARGOS | overhead view"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window, setup.click)
     camera_exposure = float(args.camera_exposure)
@@ -638,7 +638,7 @@ def main():
     print("Manual check works before arena calibration: focus this window, press M, use Hand Gestures to drive and toggle gripper.")
     print("Camera setup: [ darker | ] brighter (clears six zone marks); Z clears zones only; R clears corners and zones.")
     print("Home: place the stopped rover at field center and press H to save its marker position; press B during Auto to return there and restart. Q/window close stops immediately.")
-    print("Offline geometry only: run ExpoRedCrObot.py --simulate-gripper; it does not open a camera or connect to the robot.")
+    print("Offline geometry only: run ARGOS.py --simulate-gripper; it does not open a camera or connect to the robot.")
     print("Auto requires --enable-auto --confirm-motion and a measured --mm-per-pixel value; press A only after the on-screen checks pass.")
 
     try:

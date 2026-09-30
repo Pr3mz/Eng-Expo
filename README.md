@@ -1,4 +1,4 @@
-# ExpoRedCrObot (Field-Ready Edition 🏆)
+# ARGOS (Autonomous Robotic Gemstone Overhead Sorter) 🏆
 
 This project contains the complete, field-ready Python overhead camera tracking system and ESP32 firmware for a six-color autonomous gem-sorting robot.
 

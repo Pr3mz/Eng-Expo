@@ -13,7 +13,6 @@ flowchart TD
     Start([Init Camera & UDP Link]) --> Check{Await User Command}
 
     Check -->|Press M| Manual[Manual Mode]
-    Manual --> W[Keyboard W, A, S, D Drive]
     Manual --> G[MediaPipe Hand Gesture Drive]
     
     Check -->|Press Spacebar| Auto[Autonomous Mode]
@@ -59,4 +58,4 @@ python3 Final1.py
 - `[` / `]` : Adjust Brightness
 - `Q` : Quit Program
 - `R` : Reset Corners
-- `M` : Toggle Manual Mode (Enables Gesture & Keyboard control)
+- `M` : Toggle Manual Mode (Enables Hand Gesture control)

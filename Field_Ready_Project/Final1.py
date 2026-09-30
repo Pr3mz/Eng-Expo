@@ -186,7 +186,7 @@ def run_gripper_simulator(distance_px: float, radius_px: float) -> int:
                       else f"Approach {nearest[2]}: {gem_distance:.0f}px to zone center")
             status_color = (0, 0, 255) if inside else (0, 220, 255)
             cv2.putText(image, status, (42, height - 64), cv2.FONT_HERSHEY_SIMPLEX, 0.68, status_color, 2)
-            cv2.putText(image, "W/S move | A/D turn | R reset | adjust sliders | Q quit",
+            cv2.putText(image, "Gestures drive | R reset | adjust sliders | Q quit",
                         (42, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (245, 245, 245), 1)
             cv2.imshow(window, image)
 
@@ -635,7 +635,7 @@ def main():
     os.makedirs("debug_captures/annotated", exist_ok=True)
     
     print("Click the four arena corners in the raw camera view. After the warp appears, click each of the six target-circle centers in any order; its color label is read from the camera.")
-    print("Manual check works before arena calibration: focus this window, press M, use W/A/D to drive, S to stop, O/C for the gripper.")
+    print("Manual check works before arena calibration: focus this window, press M, use Hand Gestures to drive and toggle gripper.")
     print("Camera setup: [ darker | ] brighter (clears six zone marks); Z clears zones only; R clears corners and zones.")
     print("Home: place the stopped rover at field center and press H to save its marker position; press B during Auto to return there and restart. Q/window close stops immediately.")
     print("Offline geometry only: run ExpoRedCrObot.py --simulate-gripper; it does not open a camera or connect to the robot.")
@@ -702,10 +702,10 @@ def main():
             if setup.homography is None:
                 if manual_mode and manual_command in "FBLR" and link.is_online:
                     link.drive(manual_command)
-                    manual_status = f"MANUAL {manual_command} | M toggle | W/A/D drive | S stop"
+                    manual_status = f"MANUAL {manual_command} | M exit | Gestures active"
                 else:
                     link.stop()
-                    manual_status = "MANUAL ON | W/A/D drive | S stop | M exit" if manual_mode else "STOPPED | M manual | Q quit"
+                    manual_status = "MANUAL ON | Gestures active | M exit" if manual_mode else "STOPPED | M manual | Q quit"
                 lines = [
                     f"STEP 1: SETUP ARENA CORNERS ({len(setup.corners)}/4)",
                     "Please click the 4 corners of the arena on this screen.",

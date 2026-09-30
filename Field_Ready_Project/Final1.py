@@ -25,6 +25,10 @@ from navigation_math import wrap_angle
 from robot_link import RobotLink
 from safety import auto_preflight_blockers
 from sorter_planner import SorterPlanner
+try:
+    from gesture_control import GestureController
+except ImportError:
+    GestureController = None
 from vision import (
     PALETTE, RobotPose, detect_gems, detect_gems_roboflow, detect_robot_pose,
     make_homography, sample_target_color,
@@ -586,6 +590,8 @@ def main():
     cv2.setMouseCallback(window, setup.click)
     camera_exposure = float(args.camera_exposure)
     digital_gain = 1.0
+    gesture_controller = GestureController() if GestureController is not None else None
+    gesture_is_grabbed = False
 
     def change_exposure(delta: float) -> None:
         nonlocal camera_exposure, auto_enabled, auto_start_pending, manual_command, digital_gain

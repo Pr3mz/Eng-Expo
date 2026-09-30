@@ -6,50 +6,57 @@ Main executable: **`Field_Ready_Project/Final1.py`**
 
 ---
 
+## 🗺️ System Flowchart
+
+```mermaid
+flowchart TD
+    Start([Init Camera & UDP Link]) --> Check{Await User Command}
+
+    Check -->|Press M| Manual[Manual Mode]
+    Manual --> W[Keyboard W, A, S, D Drive]
+    Manual --> G[MediaPipe Hand Gesture Drive]
+    
+    Check -->|Press Spacebar| Auto[Autonomous Mode]
+    Auto --> Vision[Roboflow AI Detection]
+    Vision --"Gem & Robot Coordinates"--> Planner{State Machine}
+    
+    Planner -->|1| SeekGem[SEEKING_GEM: Drive to gem]
+    SeekGem -->|2| Grab[GRABBING_GEM: Close gripper]
+    Grab -->|3| SeekDrop[SEEKING_DROP: Drive to color zone]
+    SeekDrop -->|4| Drop[DROPPING_PAYLOAD: Open gripper & Reverse]
+    Drop -->|Loop| SeekGem
+```
+
+---
+
 ## ✨ Features (Hybrid AI + CV Architecture)
 
-1. **AI Object Detection (Roboflow):** 
-   - Uses an intelligent cloud-based object detection model to identify 6 colored gems, ignoring background noise, reflections, and people.
-   - Features a beautiful Roboflow-style UI drawing bounding boxes directly on the live feed.
-2. **Emergency CV Fallback:**
-   - If the local network fails or the Cloud API times out, the robot **does not freeze**. It instantly falls back to local HSV color segmentation to keep the robot moving during the competition.
-3. **Robot Exclusion Zone:**
-   - Projects a dynamic 130-pixel barrier around the robot's ArUco marker to instantly delete false-positive AI gem detections on the robot's chassis.
-4. **Smart Twin Resolver:**
-   - Automatically handles the lighting confusion between Cyan and Blue during the drop-zone calibration step.
-5. **Digital Gain Exposure Control:**
-   - Software-based brightness multiplier via the `[` and `]` hotkeys for webcams that lock their hardware exposure on Mac/Windows.
-6. **Mobile IP Webcam Support:**
-   - Supports streaming directly from Android devices by using an HTTP URL as the camera index.
+1. **AI Object Detection (Roboflow):** Cloud AI identification ignoring clutter.
+2. **Emergency CV Fallback:** Falls back to local HSV tracking if WiFi drops.
+3. **Hand Gesture Control (MediaPipe):** Drive the robot and operate the gripper using hand gestures in Manual Mode.
+4. **Robot Exclusion Zone:** 130px dynamic barrier to prevent self-detection loops.
+5. **Smart Twin Resolver:** Auto-handles Cyan/Blue lighting overlap.
+6. **Mobile IP Webcam Support:** Use Android cameras via HTTP URLs.
 
 ---
 
 ## 🚀 How to Run
 
-Open a terminal and run:
 ```bash
 cd Field_Ready_Project
 python3 Final1.py
 ```
-*(To use a mobile camera, run: `python3 Final1.py --camera-index http://192.168.x.x:8080/video`)*
 
 ### Setup Steps
-1. **STEP 1:** Click the 4 corners of the arena to map the perspective (Homography).
-2. **STEP 2:** Click the center of all 6 colored drop zones to calibrate the target coordinates.
-3. **READY:** Place the robot in the arena, ensure the green ArUco tracker locks on, and press `Spacebar` to start autonomous sorting!
+1. **STEP 1:** Click 4 corners for homography.
+2. **STEP 2:** Click 6 colored drop zones.
+3. **READY:** Press `Spacebar` to start Auto Mode, or `M` to drive via Gestures/Keyboard!
 
 ---
 
 ## ⌨️ Hotkeys
-
 - `Spacebar` : Start / Stop Auto Mode
-- `[` / `]` : Decrease / Increase Brightness
+- `[` / `]` : Adjust Brightness
 - `Q` : Quit Program
-- `R` : Reset Arena Corners
-- `Z` : Reset Drop Zones
-- `M` : Toggle Manual Mode
-  - `W`, `A`, `S`, `D` : Drive
-  - `O` / `C` : Open/Close Gripper
-
----
-*Last Updated: Sept 30, 2026 - Cleaned workspace & Integrated Roboflow AI*
+- `R` : Reset Corners
+- `M` : Toggle Manual Mode (Enables Gesture & Keyboard control)

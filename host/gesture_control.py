@@ -18,6 +18,7 @@ class GestureController:
         self.last_arm_time = 0
         self.start_time = time.time()
         self.last_ts_ms = -1
+        self._switch_armed = True   # gripper switch needs the gesture released between flips
 
     def detect_fingers(self, landmarks, hand_side):
         """Return dict of which fingers are up for the given hand."""
@@ -40,6 +41,7 @@ class GestureController:
 
     def is_thumb_and_pinky(self, f): return f["thumb"] and not f["index"] and not f["middle"] and not f["ring"] and f["pinky"]
     def is_L_shape(self, f): return f["thumb"] and f["index"] and not f["middle"] and not f["ring"] and not f["pinky"]
+    def is_index_pinky(self, f): return f["index"] and f["pinky"] and not f["middle"] and not f["ring"]  # thumb ignored
     def is_three_fingers(self, f): return not f["thumb"] and f["index"] and f["middle"] and f["ring"] and not f["pinky"]
     def is_four_fingers(self, f): return not f["thumb"] and f["index"] and f["middle"] and f["ring"] and f["pinky"]
     def is_five(self, f): return all(f.values())
@@ -66,6 +68,8 @@ class GestureController:
 
         h, w, _ = frame_flipped.shape
 
+        if not res.hand_landmarks:
+            self._switch_armed = True
         if res.hand_landmarks:
             for idx, landmarks in enumerate(res.hand_landmarks):
                 # Draw skeleton
@@ -89,11 +93,20 @@ class GestureController:
 
             L, R = left_f is not None, right_f is not None
             
-            # Check toggle servo
+            # Gripper works like a switch: index + pinky on EITHER hand flips
+            # open <-> closed, and it stays there until the next index + pinky.
+            # The gesture must be released before it can flip again, so holding
+            # it up does not make the gripper flutter.
+            switch_pose = (L and self.is_index_pinky(left_f)) or (R and self.is_index_pinky(right_f))
             toggle_triggered = False
-            if R and self.is_thumb_and_pinky(right_f): toggle_triggered = True
+            if switch_pose:
+                if self._switch_armed:
+                    toggle_triggered = True
+                    self._switch_armed = False
+            else:
+                self._switch_armed = True
 
-            if toggle_triggered and (time.time() - self.last_arm_time > 1.0):
+            if toggle_triggered and (time.time() - self.last_arm_time > 0.5):
                 new_is_grabbed = not is_grabbed
                 self.last_arm_time = time.time()
                 # Copy the flipped frame back so it renders correctly

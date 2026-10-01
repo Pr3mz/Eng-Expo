@@ -44,13 +44,14 @@ Layout: `host/` = Python (laptop), `firmware/src/` = ESP32 (built via root `plat
     *   *Logic:* Emits action commands (`F`, `B`, `L`, `R`, `C`, `O`). 
 *   **`robot_link.py`**: The UDP Network Layer.
     *   *Task:* Wraps Python `socket` to send commands to the ESP32 over a 2.4GHz hotspot.
-    *   *Crucial Variable:* `DRIVE_SIGN = {"F": (-1, -1), ...}`. Due to how the camera/marker is mounted, "Forward" actually requires negative PWM values. NEVER change this unless the physical robot is rebuilt.
+    *   *Crucial Variable:* `DRIVE_SIGN = {"F": (1, 1), ...}`. With the InEngMotor firmware "Forward" is positive PWM (`F: (1, 1)`). The table must match the motor code in the firmware: if the firmware motor driver changes, re-check direction on the real robot before changing it.
 *   **`gesture_control.py`**: The ML Hand Tracking module (MediaPipe).
 
 ### 3.2 Firmware (`firmware/src/ExpoRedCrObot.ino`)
 *   **Microcontroller:** ESP32 (Arduino framework via PlatformIO).
 *   **Network:** Wi-Fi UDP server listening on port `4217`. (Default IP: `10.218.230.31`).
-*   **Motors:** Direct LEDC PWM skid-steer (left 26/27 inverted, right 16/17, 20 kHz). `InEngMotor` is no longer used.
+*   **Motors:** `InEngMotor` library (`lib/InEngMotor`, `inengmotor.drive(left, right)`): left 26/27 inverted, right 16/17, 20 kHz, LEDC channels 0-3. Do not replace it with hand-written LEDC code: that drove the opposite pin per sign, which is why `DRIVE_SIGN` had to be negated when switching back to the library.
+*   **Servo:** besides `OPEN`/`CLOSE`, the robot accepts `G <us>` (500-2500) to set an exact pulse; the host uses it with the open/close values in `robot_settings.json`.
 *   **Wi-Fi credentials:** `firmware/src/secrets.h` (not in git; copy from `secrets.example.h`).
 *   **Servo:** Hardware PWM (LEDC) on **Pin 19**.
     *   `SERVO_OPEN_US = 1100`

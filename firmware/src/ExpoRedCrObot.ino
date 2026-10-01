@@ -2,6 +2,7 @@
 #include <WiFiUdp.h>
 #include <TFT_eSPI.h>
 #include <esp_arduino_version.h>
+#include <InEngMotor.h>
 #include <cstring>
 #include <cstdio>
 
@@ -24,23 +25,16 @@ namespace
   // Isolate this firmware from the older controller still sending M packets to 4210.
   constexpr uint16_t UDP_PORT = 4217;
   constexpr uint8_t ROBOT_MARKER_ID = 34;
-  // Match the X-ROVER motor library's physical pin order and left-wheel inversion.
-  constexpr uint8_t LEFT_IN1 = 26;
-  constexpr uint8_t LEFT_IN2 = 27;
-  constexpr uint8_t RIGHT_IN1 = 16;
-  constexpr uint8_t RIGHT_IN2 = 17;
-  constexpr uint8_t LEFT_CH1 = 0;
-  constexpr uint8_t LEFT_CH2 = 1;
-  constexpr uint8_t RIGHT_CH1 = 2;
-  constexpr uint8_t RIGHT_CH2 = 3;
-  constexpr uint32_t MOTOR_PWM_HZ = 20000;
-  constexpr uint8_t MOTOR_PWM_BITS = 8;
+  // Wheel pins, PWM and left-wheel inversion come from the InEngMotor library
+  // (GPIO 26/27 left, 16/17 right, 20 kHz, LEDC channels 0-3).
   constexpr uint8_t SERVO_PIN = 19;
   constexpr uint8_t SERVO_CHANNEL = 4;
   constexpr uint32_t SERVO_HZ = 50;
   constexpr uint8_t SERVO_BITS = 16;
   constexpr uint16_t SERVO_OPEN_US = 1100;
   constexpr uint16_t SERVO_CLOSE_US = 1950;
+  constexpr int SERVO_MIN_US = 500;
+  constexpr int SERVO_MAX_US = 2500;
   constexpr int MAX_DRIVE = 255;
   constexpr int TURN_SPEED = 145;
   constexpr int ACCEL_STEP = 25;
@@ -68,60 +62,11 @@ namespace
   char statusLine[24] = "";
   char packet[64];
 
-  bool attachMotorPwm()
-  {
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    const bool l1 = ledcAttachChannel(LEFT_IN1, MOTOR_PWM_HZ, MOTOR_PWM_BITS, LEFT_CH1);
-    const bool l2 = ledcAttachChannel(LEFT_IN2, MOTOR_PWM_HZ, MOTOR_PWM_BITS, LEFT_CH2);
-    const bool r1 = ledcAttachChannel(RIGHT_IN1, MOTOR_PWM_HZ, MOTOR_PWM_BITS, RIGHT_CH1);
-    const bool r2 = ledcAttachChannel(RIGHT_IN2, MOTOR_PWM_HZ, MOTOR_PWM_BITS, RIGHT_CH2);
-    return l1 && l2 && r1 && r2;
-#else
-    const bool l1 = ledcSetup(LEFT_CH1, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    const bool l2 = ledcSetup(LEFT_CH2, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    const bool r1 = ledcSetup(RIGHT_CH1, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    const bool r2 = ledcSetup(RIGHT_CH2, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    ledcAttachPin(LEFT_IN1, LEFT_CH1);
-    ledcAttachPin(LEFT_IN2, LEFT_CH2);
-    ledcAttachPin(RIGHT_IN1, RIGHT_CH1);
-    ledcAttachPin(RIGHT_IN2, RIGHT_CH2);
-    return l1 && l2 && r1 && r2;
-#endif
-  }
-
-  void writeMotorPwm(uint8_t pin, uint8_t channel, int duty)
-  {
-    duty = constrain(duty, 0, 255);
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    ledcWrite(pin, duty);
-#else
-    ledcWrite(channel, duty);
-#endif
-  }
-
-  void setOneMotor(int in1, int in2, uint8_t ch1, uint8_t ch2, int speed, bool inverted)
-  {
-    speed = constrain(speed, -255, 255);
-    if (inverted)
-      speed = -speed;
-    if (speed >= 0)
-    {
-      writeMotorPwm(in1, ch1, speed);
-      writeMotorPwm(in2, ch2, 0);
-    }
-    else
-    {
-      writeMotorPwm(in1, ch1, 0);
-      writeMotorPwm(in2, ch2, -speed);
-    }
-  }
-
   void driveWheels(int left, int right)
   {
     if (!motorsReady)
       return;
-    setOneMotor(LEFT_IN1, LEFT_IN2, LEFT_CH1, LEFT_CH2, left, true);
-    setOneMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_CH1, RIGHT_CH2, right, false);
+    inengmotor.drive(left, right);
   }
 
   void showStatus(const char *line)
@@ -159,6 +104,16 @@ namespace
     udp.endPacket();
   }
 
+  void writeServoPulse(uint16_t pulseUs)
+  {
+    const uint32_t duty = (static_cast<uint32_t>(pulseUs) * ((1UL << SERVO_BITS) - 1)) / 20000UL;
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    ledcWriteChannel(SERVO_CHANNEL, duty);
+#else
+    ledcWrite(SERVO_CHANNEL, duty);
+#endif
+  }
+
   void setGrip(bool close)
   {
     if (!servoReady)
@@ -166,15 +121,25 @@ namespace
       sendReply("ERR SERVO");
       return;
     }
-    const uint16_t pulseUs = close ? SERVO_CLOSE_US : SERVO_OPEN_US;
-    const uint32_t duty = (static_cast<uint32_t>(pulseUs) * ((1UL << SERVO_BITS) - 1)) / 20000UL;
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    ledcWriteChannel(SERVO_CHANNEL, duty);
-#else
-    ledcWrite(SERVO_CHANNEL, duty);
-#endif
+    writeServoPulse(close ? SERVO_CLOSE_US : SERVO_OPEN_US);
     showStatus(close ? "Gripper close" : "Gripper open");
     sendReply(close ? "ACK GRIP CLOSE" : "ACK GRIP OPEN");
+  }
+
+  // "G <microseconds>": move the gripper servo to an exact pulse width, used
+  // by the host's servo tester and its saved open/close positions.
+  void setGripPulse(int pulseUs)
+  {
+    if (!servoReady)
+    {
+      sendReply("ERR SERVO");
+      return;
+    }
+    pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
+    writeServoPulse(static_cast<uint16_t>(pulseUs));
+    char reply[24];
+    snprintf(reply, sizeof(reply), "ACK GRIP %d", pulseUs);
+    sendReply(reply);
   }
 
   bool connectWifi()
@@ -294,6 +259,14 @@ namespace
         {
           setGrip(true);
         }
+        else if (packet[0] == 'G')
+        {
+          int pulseUs = 0;
+          if (sscanf(packet + 1, "%d", &pulseUs) == 1)
+            setGripPulse(pulseUs);
+          else
+            sendReply("ERR GRIP FORMAT");
+        }
         else if (packet[0] == 'M')
         {
           int left = 0;
@@ -359,7 +332,8 @@ void setup()
   screenReady = true;
   showStatus("Booting - stopped");
 
-  motorsReady = attachMotorPwm();
+  inengmotor.begin();
+  motorsReady = true;
   stopNow();
   if (!motorsReady)
   {

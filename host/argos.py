@@ -22,6 +22,8 @@ import numpy as np
 
 from camera_stream import LatestFrameCamera
 from navigation_math import wrap_angle
+import robot_settings
+from setup_panel import SetupPanel
 from robot_link import RobotLink
 from safety import auto_preflight_blockers
 from sorter_planner import SorterPlanner
@@ -39,13 +41,12 @@ WARP_W = 800
 WARP_H = 600
 ZONE_RADIUS_PX = 48
 ZONE_EXCLUSION_RADIUS_PX = 115
-ROBOT_EXCLUSION_RADIUS_PX = 130 #80
-CRUISE_DRIVE_SPEED = 210
-# This rover did not move at PWM 90 or 145 on the floor. Slow the approach
-# with shorter pulses while keeping enough torque to start the wheels.
-CREEP_DRIVE_SPEED = 200
+# Robot size, gripper geometry, scale and drive speeds live in
+# robot_settings.json; press G for the slider panel. This rover did not move
+# at PWM 90 or 145 on the floor, so keep creep_speed high and pulses short.
+CFG = robot_settings.load()
+CFG["servo_test_us"] = CFG["servo_open_us"]   # live tester starts at the open position
 NEAR_TARGET_MARGIN_MM = 150
-DROP_DISTANCE_MM = os.getenv("DROP_DISTANCE_MM", "125")
 ANGLE_THRESHOLD = math.radians(float(os.getenv("ANGLE_THRESHOLD_DEG", "20")))
 CAMERA_API = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
 MAX_FRAME_AGE_S = 0.75
@@ -75,6 +76,35 @@ def ipv4_address(value: str) -> str:
         raise argparse.ArgumentTypeError("robot IP must be a valid IPv4 address") from exc
 
 
+def apply_settings(args) -> None:
+    """Copy the shared CFG values into the run options the loop reads."""
+    args.gripper_distance_px = max(1.0, CFG["gripper_distance_px"])
+    args.gripper_radius_px = max(1.0, CFG["gripper_radius_px"])
+    args.mm_per_pixel = CFG["mm_per_pixel"] or None
+    args.drop_distance_mm = CFG["drop_distance_mm"]
+    args.pickup_distance_mm = (
+        args.gripper_radius_px * args.mm_per_pixel
+        if args.mm_per_pixel is not None else None
+    )
+
+
+def grip_command(close: bool) -> str:
+    """Gripper move to the saved open/close pulse width (robot command G <us>)."""
+    return f"G {int(CFG['servo_close_us' if close else 'servo_open_us'])}"
+
+
+def manual_speed(command: str, held_s: float = 1e9) -> int:
+    """Forward/reverse go straight to full speed (the firmware eases in over
+    ~0.1 s). Turns ramp from turn_start_speed up to manual_turn_speed over
+    turn_ramp_s seconds so they start gently."""
+    if command not in "LR":
+        return int(CFG["manual_speed"])
+    top, start, ramp = CFG["manual_turn_speed"], min(CFG["turn_start_speed"], CFG["manual_turn_speed"]), CFG["turn_ramp_s"]
+    if ramp <= 0:
+        return int(top)
+    return int(start + (top - start) * min(1.0, held_s / ramp))
+
+
 def gripper_point_from_heading(x: float, y: float, heading: float, distance_px: float) -> tuple[int, int]:
     """Project a virtual gripper point forward from the robot marker center."""
     return (
@@ -91,7 +121,7 @@ def robot_exclusion_regions(
     """Mask colored robot stickers along the chassis, arms, and gripper."""
     ux, uy = math.cos(pose.heading), math.sin(pose.heading)
     front_distance = math.dist((pose.x, pose.y), gripper_point)
-    rear_distance = 60.0
+    rear_distance = CFG["robot_rear_px"]
     end_distance = front_distance + max(25.0, gripper_radius_px)
     total_distance = rear_distance + end_distance
     # The marker center is not the full robot footprint: servo covers and
@@ -99,14 +129,15 @@ def robot_exclusion_regions(
     # samples generously so those patches cannot reappear as gem contours.
     sample_count = max(1, int(math.ceil(total_distance / 24.0)))
     arm_radius = max(60, int(round(gripper_radius_px + 40)))
-    regions = [((pose.x, pose.y), ROBOT_EXCLUSION_RADIUS_PX)]
+    robot_radius = int(round(CFG["robot_radius_px"]))
+    regions = [((pose.x, pose.y), robot_radius)]
     for index in range(sample_count + 1):
         offset = -rear_distance + total_distance * index / sample_count
         center = (
             int(round(pose.x + ux * offset)),
             int(round(pose.y + uy * offset)),
         )
-        radius = ROBOT_EXCLUSION_RADIUS_PX if offset <= 0 else arm_radius
+        radius = robot_radius if offset <= 0 else arm_radius
         regions.append((center, radius))
     return tuple(regions)
 
@@ -433,7 +464,7 @@ def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOW
     if manual_mode:
         lines = [
             "MANUAL MODE (GESTURE CONTROL v1.3.0)",
-            "Gestures: 5+5=FWD  I+M+P=REV  4L=LEFT  4R=RIGHT  L-shape=SERVO",
+            "Gestures: both open=FWD  both 3 fingers=REV  4 fingers L/R hand=TURN  index+pinky=GRIPPER switch",
             f"Command: {manual_command} | Gripper: {'CLOSED' if gesture_is_grabbed else 'OPEN'} | [ SPACEBAR ] to AUTO",
         ]
     elif setup is not None:
@@ -458,7 +489,7 @@ def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOW
                 "READY TO START!",
                 "Place robot in arena (make sure green circle appears).",
                 "Press [ SPACEBAR ] to START AUTO!",
-                "Shortcuts: [Z] Zones | [R] Reset | [,] Exposure"
+                "Shortcuts: [G] Robot setup | [Z] Zones | [R] Reset | [ ] Exposure"
             ]
             if reason:
                 lines.append(reason)
@@ -530,10 +561,10 @@ def main():
     parser.add_argument("--robot-ip", type=ipv4_address, default=os.getenv("ROBOT_IP") or None,
                         help="known ESP32 IP for unicast discovery when hotspot blocks broadcasts")
     parser.add_argument("--gripper-distance-px", type=positive_float,
-                        default=positive_float(os.getenv("GRIPPER_DISTANCE_PX", "110")),
+                        default=positive_float(os.getenv("GRIPPER_DISTANCE_PX") or str(CFG["gripper_distance_px"])),
                         help="virtual gripper center distance forward from the robot ArUco center, in warped-image pixels")
     parser.add_argument("--gripper-radius-px", type=positive_float,
-                        default=positive_float(os.getenv("GRIPPER_RADIUS_PX", "20")),
+                        default=positive_float(os.getenv("GRIPPER_RADIUS_PX") or str(CFG["gripper_radius_px"])),
                         help="virtual gripper capture/search radius in warped-image pixels")
     parser.add_argument("--colors", default=",".join(vision.PALETTE),
                         help=f"comma list of stone colors to sort (default from ARGOS_COLORS); choose from {', '.join(vision.ALL_COLORS)}")
@@ -552,10 +583,10 @@ def main():
     diagnostics = parser.add_mutually_exclusive_group()
     diagnostics.add_argument("--scan-cameras", action="store_true", help="list usable camera indices without connecting to the robot")
     diagnostics.add_argument("--check-robot", action="store_true", help="test safe UDP discovery without opening a camera or moving")
-    scale_text = os.getenv("MM_PER_PIXEL", "").strip()
+    scale_text = os.getenv("MM_PER_PIXEL", "").strip() or (str(CFG["mm_per_pixel"]) if CFG["mm_per_pixel"] > 0 else "")
     try:
         scale_default = positive_float(scale_text) if scale_text else None
-        drop_distance = positive_float(DROP_DISTANCE_MM)
+        drop_distance = positive_float(os.getenv("DROP_DISTANCE_MM") or str(CFG["drop_distance_mm"]))
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(str(exc))
     parser.add_argument("--mm-per-pixel", type=positive_float, default=scale_default,
@@ -571,11 +602,10 @@ def main():
     args.confirm_motion = True
     if args.start_auto and not args.enable_auto:
         parser.error("--start-auto requires --enable-auto")
-    args.pickup_distance_mm = (
-        args.gripper_radius_px * args.mm_per_pixel
-        if args.mm_per_pixel is not None else None
-    )
-    args.drop_distance_mm = drop_distance
+    # Command-line/env values win at startup; the G panel edits them live.
+    CFG.update(gripper_distance_px=args.gripper_distance_px, gripper_radius_px=args.gripper_radius_px,
+               mm_per_pixel=args.mm_per_pixel or 0.0, drop_distance_mm=drop_distance)
+    apply_settings(args)
 
     if args.scan_cameras:
         return scan_cameras(exposure=args.camera_exposure)
@@ -609,6 +639,18 @@ def main():
     digital_gain = 1.0
     gesture_controller = GestureController() if GestureController is not None else None
     gesture_is_grabbed = False
+    setup_panel = SetupPanel(CFG)
+    servo_test = {"sent": int(CFG["servo_test_us"]), "at": 0.0}
+    gripper_homed = False   # the firmware sends no servo pulse at boot, so open it once we are connected
+
+    def sync_servo_test() -> None:
+        """Move the gripper servo live while the TEST slider is dragged."""
+        value = int(CFG["servo_test_us"])
+        now = time.monotonic()
+        # Rate-limited: every write restarts the servo PWM wave on the robot.
+        if value != servo_test["sent"] and now - servo_test["at"] >= 0.15 and link.is_online:
+            link.send(f"G {value}")
+            servo_test["sent"], servo_test["at"] = value, now
 
     def change_exposure(delta: float) -> None:
         nonlocal camera_exposure, auto_enabled, auto_start_pending, manual_command, digital_gain
@@ -662,6 +704,11 @@ def main():
     try:
         while True:
             link.discover()
+            if not gripper_homed and link.is_online:
+                link.send(grip_command(False))
+                gripper_homed = True
+                gesture_is_grabbed = False
+                print(f"Gripper set to open ({int(CFG['servo_open_us'])} us)", flush=True)
             if manual_command != "S" and time.monotonic() > manual_deadline:
                 manual_command = "S"
             raw, frame_age, frozen, camera_error = camera.read_latest()
@@ -720,21 +767,16 @@ def main():
                 if gesture_controller:
                     cmd, gesture_is_grabbed = gesture_controller.process_frame(raw_view, gesture_is_grabbed)
                     
-                    # Track when movement direction changes for acceleration
                     if cmd in ('F', 'B', 'L', 'R'):
+                        now = time.monotonic()
                         if cmd != manual_command:
-                            move_start_time = time.monotonic()
+                            move_start_time = now
                         manual_command = cmd
-                        manual_deadline = time.monotonic() + 0.3
-                        
-                        # Acceleration: ramp from 140 to 200 over 3 seconds
-                        elapsed = time.monotonic() - move_start_time
-                        current_speed = int(140 + (200 - 140) * min(1.0, elapsed / 3.0))
-                        
-                        link.drive(manual_command, speed=current_speed)
+                        manual_deadline = now + 0.3
+                        link.drive(manual_command, speed=manual_speed(manual_command, now - move_start_time))
                     elif cmd in ('C', 'O'):
                         manual_command = cmd
-                        link.send("CLOSE" if cmd == 'C' else "OPEN")
+                        link.send(grip_command(cmd == 'C'))
                     else:
                         # Gesture is 'S' or no hands — STOP immediately
                         if manual_command != 'S':
@@ -748,11 +790,15 @@ def main():
                                 link.sock.sendto(b"STOP", (link.robot_ip, link.port))
                             link._last_stop = time.monotonic()
                         
+                setup_panel.poll()
+                sync_servo_test()
                 draw_status(raw_view, [], setup=setup, auto_enabled=False, manual_mode=True, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
                 cv2.imshow(window, raw_view)
                 
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord(' '):
+                if key in (ord('g'), ord('G')):
+                    setup_panel.toggle()
+                elif key == ord(' '):
                     manual_mode = False
                     auto_start_pending = True
                     auto_enabled = False
@@ -766,7 +812,7 @@ def main():
 
             if setup.homography is None:
                 if manual_mode and manual_command in "FBLR" and link.is_online:
-                    link.drive(manual_command)
+                    link.drive(manual_command, speed=manual_speed(manual_command))
                     manual_status = f"MANUAL {manual_command} | M exit | Gestures active"
                 else:
                     link.stop()
@@ -804,7 +850,7 @@ def main():
                     manual_command = "S"
                     manual_deadline = 0.0
                     link.stop()
-                    link.send("OPEN" if key == ord("o") else "CLOSE")
+                    link.send(grip_command(key != ord("o")))
                 continue
 
             view = cv2.warpPerspective(raw, setup.homography, (WARP_W, WARP_H))
@@ -827,6 +873,10 @@ def main():
             # The existing robot-tag center is the origin; the configured
             # offset is projected along the detected heading on the rectified
             # overhead image.
+            if setup_panel.poll():
+                apply_settings(args)
+            sync_servo_test()
+
             gripper_point = None
             if pose is not None:
                 cosine = math.cos(pose.heading)
@@ -840,6 +890,14 @@ def main():
                 zone_label = f"GRIP ZONE d={args.gripper_distance_px:g}px r={args.gripper_radius_px:g}px"
                 cv2.putText(view, zone_label, (gripper_point[0] + 8, gripper_point[1] - int(args.gripper_radius_px) - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1)
+
+            if setup_panel.is_open and pose is not None:
+                # Show robot size and rear end on the real robot while tuning.
+                cv2.circle(view, (pose.x, pose.y), int(CFG["robot_radius_px"]), (0, 165, 255), 2)
+                rear = gripper_point_from_heading(pose.x, pose.y, pose.heading, -CFG["robot_rear_px"])
+                cv2.circle(view, rear, 6, (0, 165, 255), -1)
+                cv2.putText(view, "ROBOT SIZE", (pose.x - 45, pose.y + int(CFG["robot_radius_px"]) + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, cv2.LINE_AA)
 
             zones_ready = len(setup.zones) == len(vision.PALETTE)
             excluded_regions = [(center, ZONE_EXCLUSION_RADIUS_PX) for center in setup.zones.values()]
@@ -980,7 +1038,7 @@ def main():
                 if decision.action is not None:
                     now = time.monotonic()
                     if decision.action != getattr(link, "last_action", None) or now - getattr(link, "last_action_time", 0) > 1.0:
-                        link.send(decision.action)
+                        link.send(grip_command(decision.action == "CLOSE"))
                         link.last_action = decision.action
                         link.last_action_time = now
                 if decision.target is not None and command in "FBLR":
@@ -1031,11 +1089,11 @@ def main():
                         reason = f"AUTO RECOVERY {stuck_recovery_count}: backing up and changing approach"
                         print(reason, flush=True)
                         if link.is_online:
-                            link.drive("B", speed=CREEP_DRIVE_SPEED)
+                            link.drive("B", speed=int(CFG["creep_speed"]))
                             time.sleep(0.22)
                             link.stop()
                             turn = "L" if stuck_recovery_count % 2 else "R"
-                            link.drive(turn, speed=CREEP_DRIVE_SPEED)
+                            link.drive(turn, speed=int(CFG["creep_speed"]))
                             time.sleep(0.14)
                             link.stop()
                         command = "S"
@@ -1067,7 +1125,7 @@ def main():
                       and time.monotonic() >= view_recovery_next_at):
                     view_recovery_count += 1
                     print(f"AUTO RECOVERY: reverse pulse {view_recovery_count}/{VIEW_RECOVERY_MAX_PULSES}", flush=True)
-                    link.drive("B", speed=CREEP_DRIVE_SPEED)
+                    link.drive("B", speed=int(CFG["creep_speed"]))
                     time.sleep(VIEW_RECOVERY_PULSE_S)
                     link.stop()
                     view_recovery_next_at = time.monotonic() + VIEW_RECOVERY_GAP_S
@@ -1084,13 +1142,13 @@ def main():
                         # down well before the stop threshold so the robot
                         # eases up to a gem or drop circle instead of lunging
                         # through it at full speed.
-                        drive_speed = CREEP_DRIVE_SPEED if near_target else CRUISE_DRIVE_SPEED
+                        drive_speed = int(CFG["creep_speed"] if near_target else CFG["cruise_speed"])
                         pulse_s = 0.25 if command in "FB" else 0.18
                         link.drive(command, speed=drive_speed)
                         time.sleep(pulse_s)
                         link.stop()
                     else:
-                        link.drive(command)
+                        link.drive(command, speed=manual_speed(command))
                 else:
                     auto_enabled = False
                     manual_command = "S"
@@ -1103,7 +1161,7 @@ def main():
             draw_status(view, [
                 reason,
                 f"Robot: {link.status}",
-                f"Auto {'ON' if auto_enabled else 'OFF'} | Manual {'ON' if manual_mode else 'OFF'} | H mark center | B return/restart | Q stop+quit{manual_hint}",
+                f"Auto {'ON' if auto_enabled else 'OFF'} | Manual {'ON' if manual_mode else 'OFF'} | G robot setup | H mark center | B return/restart | Q stop+quit{manual_hint}",
                 f"Exposure {camera_exposure:g} | [ darker | ] brighter | Z remap circles | R reset field",
             ], setup=setup, auto_enabled=auto_enabled, phase=planner.phase, manual_mode=manual_mode, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
             
@@ -1190,7 +1248,7 @@ def main():
                 manual_deadline = 0.0
                 link.stop()
                 if link.is_online:
-                    link.send("OPEN" if key == ord("o") else "CLOSE")
+                    link.send(grip_command(key != ord("o")))
                 else:
                     print("Gripper command blocked: no fresh ESP32 reply")
             elif key == ord("["):
@@ -1229,6 +1287,8 @@ def main():
                             planner.reset()
                             print("Sorting mode started")
                 link.stop()
+            elif key in (ord("g"), ord("G")):
+                setup_panel.toggle()
             elif key == ord("r"):
                 link.stop()
                 auto_enabled = False
@@ -1238,6 +1298,7 @@ def main():
                 planner.reset()
                 print("Arena calibration cleared.")
     finally:
+        setup_panel.close()
         link.close()
         camera.release()
         rf_executor.shutdown(wait=False, cancel_futures=True)

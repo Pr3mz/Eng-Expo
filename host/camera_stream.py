@@ -97,7 +97,10 @@ class LatestFrameCamera:
         return supported, actual
 
     def release(self):
+        # Stop the reader before freeing the device: releasing while the
+        # thread is inside capture.read() segfaults on macOS (AVFoundation).
         self._stop.set()
-        self.capture.release()
-        if self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        with self._capture_lock:
+            self.capture.release()

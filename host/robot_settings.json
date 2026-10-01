@@ -1,0 +1,16 @@
+{
+  "gripper_distance_px": 110,
+  "gripper_radius_px": 20,
+  "robot_radius_px": 130,
+  "robot_rear_px": 60,
+  "mm_per_pixel": 0.0,
+  "drop_distance_mm": 125,
+  "cruise_speed": 210,
+  "creep_speed": 200,
+  "manual_speed": 222,
+  "manual_turn_speed": 222,
+  "turn_start_speed": 145,
+  "turn_ramp_s": 1.5,
+  "servo_open_us": 500,
+  "servo_close_us": 1950
+}

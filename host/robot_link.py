@@ -6,11 +6,13 @@ import socket
 import time
 
 DRIVE_SIGN = {
-    # Measured against the front of the mounted camera marker on this rover.
-    "F": (-1, -1),
-    "B": (1, 1),
-    "L": (-1, 1),
-    "R": (1, -1),
+    # Measured on this rover with the InEngMotor library in the firmware:
+    # positive PWM drives the gripper side forward. (The earlier hand-written
+    # LEDC firmware drove the opposite pins and needed the negated table.)
+    "F": (1, 1),
+    "B": (-1, -1),
+    "L": (1, -1),
+    "R": (-1, 1),
 }
 DEFAULT_DRIVE_SPEED = 200
 

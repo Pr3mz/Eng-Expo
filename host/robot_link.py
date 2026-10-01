@@ -6,11 +6,11 @@ import socket
 import time
 
 DRIVE_SIGN = {
-    # Measured on this rover with the InEngMotor library in the firmware:
-    # positive PWM drives the gripper side forward. (The earlier hand-written
-    # LEDC firmware drove the opposite pins and needed the negated table.)
-    "F": (1, 1),
-    "B": (-1, -1),
+    # Measured on this rover: every direction is the reverse of the
+    # InEngMotor library's drive(+,+) / spinLeft (-,+) / spinRight (+,-),
+    # i.e. the wheel polarity is inverted. Left = counter-clockwise seen from above.
+    "F": (-1, -1),
+    "B": (1, 1),
     "L": (1, -1),
     "R": (-1, 1),
 }
@@ -96,6 +96,21 @@ class RobotLink:
         # Match the working GemBot controller packet while keeping this
         # project's own discovery, acknowledgement, and watchdog safeguards.
         self.send(f"M {sign_left * speed} {sign_right * speed}", keepalive=True)
+
+    def drive_mix(self, forward: float, turn_left: float) -> tuple[int, int]:
+        """Send a continuous drive: forward > 0 goes ahead, turn_left > 0 turns counter-clockwise.
+
+        Built from DRIVE_SIGN so it always agrees with the F/B/L/R commands.
+        Returns the (left, right) wheel values that were sent.
+        """
+        fl, fr = DRIVE_SIGN["F"]
+        tl, tr = DRIVE_SIGN["L"]
+        left = fl * forward + tl * turn_left
+        right = fr * forward + tr * turn_left
+        peak = max(abs(left), abs(right), 255.0)
+        left, right = int(round(left * 255.0 / peak)), int(round(right * 255.0 / peak))
+        self.send(f"M {left} {right}", keepalive=True)
+        return left, right
 
     def stop(self) -> None:
         if self.robot_ip:

@@ -17,3 +17,6 @@ host/arena_calibration.json
 host/arena_calibration.json.tmp
 data/captures/
 data/color_check/
+
+# Roboflow API key (local only)
+host/.roboflow_key

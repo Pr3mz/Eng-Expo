@@ -20,11 +20,11 @@ COLOR_HUE_RANGES = {
     "violet": ((129, 169),),
 }
 ALL_COLORS = tuple(COLOR_HUE_RANGES)
-# Colors the robot actually sorts. The other stones stay on the field and are
-# still classified (so e.g. an orange stone's red-ish rim is not mistaken for
-# crimson), but they are never picked up. Override with ARGOS_COLORS or
-# argos.py --colors; always read it as vision.PALETTE so the override applies.
-DEFAULT_COLORS = ("crimson", "violet")
+# Colors the detector looks for. All six by default: the planner only picks up
+# stones whose color has a marked drop circle, so the circles you click decide
+# what is sorted. Override with ARGOS_COLORS or argos.py --colors; always read
+# it as vision.PALETTE so the override applies.
+DEFAULT_COLORS = ALL_COLORS
 
 
 COLOR_ALIASES = {"red": "crimson", "purple": "violet", "green": "lime",
@@ -366,7 +366,19 @@ def _dominant_color(hue_labels: np.ndarray, contour: np.ndarray, pad: int = 6) -
 # ========================== ROBOFLOW CLOUD API ==========================
 
 _RF_CLIENT = None
-RF_API_KEY   = os.getenv("ROBOFLOW_API_KEY", "")
+_RF_USE_PARAMETERS = True
+def _load_rf_key() -> str:
+    """ROBOFLOW_API_KEY from the environment, else host/.roboflow_key (git-ignored)."""
+    key = os.getenv("ROBOFLOW_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return (Path(__file__).resolve().parent / ".roboflow_key").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+RF_API_KEY   = _load_rf_key()
 RF_WORKSPACE = "premsupthaksina1-gmail-com"
 RF_WORKFLOW  = "arena-gemstone-rover-detections-1790759099763"
 RF_QUERY_W   = 640
@@ -450,24 +462,34 @@ def detect_gems_roboflow(
         gems  = [Gem(x, y, color, area), ...]
         drops = [(cx, cy, class_name), ...]
     """
+    global _RF_USE_PARAMETERS
     client = _get_rf_client()
-    small = cv2.resize(image, (RF_QUERY_W, RF_QUERY_H), interpolation=cv2.INTER_AREA)
+    # Keep the arena's proportions: the warped view is no longer always 4:3.
+    query_w = RF_QUERY_W
+    query_h = max(120, int(round(RF_QUERY_W * warp_h / warp_w)))
+    small = cv2.resize(image, (query_w, query_h), interpolation=cv2.INTER_AREA)
 
-    res = client.run_workflow(
-        workspace_name=RF_WORKSPACE,
-        workflow_id=RF_WORKFLOW,
-        images={"image": small},
-        parameters={
+    arguments = dict(workspace_name=RF_WORKSPACE, workflow_id=RF_WORKFLOW,
+                     images={"image": small}, use_cache=True)
+    if _RF_USE_PARAMETERS:
+        arguments["parameters"] = {
             "confidence": 0.4,
             "iou_threshold": 0.3,
             "class_agnostic_nms": False,
-            "max_detections": 1000
-        },
-        use_cache=True,
-    )
+            "max_detections": 1000,
+        }
+    try:
+        res = client.run_workflow(**arguments)
+    except Exception:
+        if not _RF_USE_PARAMETERS:
+            raise
+        # The workflow may not declare these inputs; run it with its own settings.
+        _RF_USE_PARAMETERS = False
+        arguments.pop("parameters", None)
+        res = client.run_workflow(**arguments)
 
-    sx = warp_w / RF_QUERY_W
-    sy = warp_h / RF_QUERY_H
+    sx = warp_w / query_w
+    sy = warp_h / query_h
     raw_preds = _extract_predictions(res)
 
     gems: list[Gem] = []

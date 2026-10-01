@@ -27,14 +27,15 @@ namespace
   constexpr uint8_t ROBOT_MARKER_ID = 34;
   // Wheel pins, PWM and left-wheel inversion come from the InEngMotor library
   // (GPIO 26/27 left, 16/17 right, 20 kHz, LEDC channels 0-3).
+  // Gripper servo, same setup as the team's servo test sketch:
+  // GPIO 19, 50 Hz, 16-bit, angle 0..180 mapped to 500..2500 us.
   constexpr uint8_t SERVO_PIN = 19;
-  constexpr uint8_t SERVO_CHANNEL = 4;
-  constexpr uint32_t SERVO_HZ = 50;
-  constexpr uint8_t SERVO_BITS = 16;
-  constexpr uint16_t SERVO_OPEN_US = 1100;
-  constexpr uint16_t SERVO_CLOSE_US = 1950;
-  constexpr int SERVO_MIN_US = 500;
-  constexpr int SERVO_MAX_US = 2500;
+  constexpr uint8_t SERVO_CHANNEL = 4;   // core 2.x needs an explicit channel; motors use 0-3
+  constexpr uint32_t PWM_FREQ = 50;
+  constexpr uint8_t PWM_RESOLUTION = 16;
+  constexpr int SERVO_OPEN_ANGLE = 0;    // open hands
+  constexpr int SERVO_CLOSE_ANGLE = 90;  // close hands
+  constexpr uint32_t SERVO_IDLE_RELEASE_MS = 5000; // host silent this long -> servo off
   constexpr int MAX_DRIVE = 255;
   constexpr int TURN_SPEED = 145;
   constexpr int ACCEL_STEP = 25;
@@ -49,6 +50,8 @@ namespace
   bool wifiReady = false;
   bool motorsReady = false;
   bool servoReady = false;
+  bool servoPowered = false;     // true while a pulse train is being sent to the gripper servo
+  uint32_t lastHostPacket = 0;
   bool screenReady = false;
   uint32_t lastWifiRetry = 0;
   uint32_t lastMotorUpdate = 0;
@@ -57,6 +60,11 @@ namespace
   int targetRight = 0;
   int currentLeft = 0;
   int currentRight = 0;
+  // Wheel ramp. Defaults match the original behaviour (auto mode); the host
+  // sends "RAMP <accel> <decel> <kick>" to make manual driving smoother.
+  int accelStep = ACCEL_STEP;
+  int decelStep = ACCEL_STEP;
+  int kickPwm = 0;
   IPAddress replyIp;
   uint16_t replyPort = 0;
   char statusLine[24] = "";
@@ -104,14 +112,34 @@ namespace
     udp.endPacket();
   }
 
-  void writeServoPulse(uint16_t pulseUs)
+  // Stop the pulse train: the servo goes limp, draws no holding current and
+  // cannot cook itself against a stop.
+  void releaseServo()
   {
-    const uint32_t duty = (static_cast<uint32_t>(pulseUs) * ((1UL << SERVO_BITS) - 1)) / 20000UL;
+    if (!servoReady)
+      return;
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-    ledcWriteChannel(SERVO_CHANNEL, duty);
+    ledcWrite(SERVO_PIN, 0);
+#else
+    ledcWrite(SERVO_CHANNEL, 0);
+#endif
+    servoPowered = false;
+  }
+
+  void servoWrite(int angle)
+  {
+    angle = constrain(angle, 0, 180);
+    // Map servo pulse and angle
+    const int pulseWidth = map(angle, 0, 180, 500, 2500);
+    // Calculate duty cycle
+    const uint32_t duty = (pulseWidth * 65535UL) / 20000UL;
+    // Set the servo angle
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    ledcWrite(SERVO_PIN, duty);
 #else
     ledcWrite(SERVO_CHANNEL, duty);
 #endif
+    servoPowered = true;
   }
 
   void setGrip(bool close)
@@ -121,24 +149,24 @@ namespace
       sendReply("ERR SERVO");
       return;
     }
-    writeServoPulse(close ? SERVO_CLOSE_US : SERVO_OPEN_US);
+    servoWrite(close ? SERVO_CLOSE_ANGLE : SERVO_OPEN_ANGLE);
     showStatus(close ? "Gripper close" : "Gripper open");
     sendReply(close ? "ACK GRIP CLOSE" : "ACK GRIP OPEN");
   }
 
-  // "G <microseconds>": move the gripper servo to an exact pulse width, used
-  // by the host's servo tester and its saved open/close positions.
-  void setGripPulse(int pulseUs)
+  // "SERVO <angle>": move the gripper to an exact angle (0..180), used by the
+  // host's servo tester and its saved open/close angles.
+  void setGripAngle(int angle)
   {
     if (!servoReady)
     {
       sendReply("ERR SERVO");
       return;
     }
-    pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
-    writeServoPulse(static_cast<uint16_t>(pulseUs));
+    angle = constrain(angle, 0, 180);
+    servoWrite(angle);
     char reply[24];
-    snprintf(reply, sizeof(reply), "ACK GRIP %d", pulseUs);
+    snprintf(reply, sizeof(reply), "ACK SERVO %d", angle);
     sendReply(reply);
   }
 
@@ -187,7 +215,10 @@ namespace
     right = constrain(right, -255, 255);
     if (left == 0 && right == 0)
     {
-      stopNow();
+      if (decelStep >= ACCEL_STEP && kickPwm == 0)
+        stopNow(); // original hard stop
+      else
+        targetLeft = targetRight = 0; // soft stop: updateMotors() ramps down
       showStatus("Stopped");
     }
     else if (left > 0 && right > 0)
@@ -232,6 +263,7 @@ namespace
     while (size > 0)
     {
       const int n = udp.read(packet, sizeof(packet) - 1);
+      lastHostPacket = millis();
       replyIp = udp.remoteIP();
       replyPort = udp.remotePort();
       if (n > 0)
@@ -259,13 +291,35 @@ namespace
         {
           setGrip(true);
         }
-        else if (packet[0] == 'G')
+        else if (strcmp(packet, "GOFF") == 0)
         {
-          int pulseUs = 0;
-          if (sscanf(packet + 1, "%d", &pulseUs) == 1)
-            setGripPulse(pulseUs);
+          releaseServo();
+          showStatus("Gripper off");
+          sendReply("ACK GRIP OFF");
+        }
+        else if (strncmp(packet, "SERVO", 5) == 0)
+        {
+          int angle = 0;
+          if (sscanf(packet + 5, "%d", &angle) == 1)
+            setGripAngle(angle);
           else
-            sendReply("ERR GRIP FORMAT");
+            sendReply("ERR SERVO FORMAT");
+        }
+        else if (strncmp(packet, "RAMP", 4) == 0)
+        {
+          int accel = 0, decel = 0, kick = 0;
+          const int fields = sscanf(packet + 4, "%d %d %d", &accel, &decel, &kick);
+          if (fields >= 2)
+          {
+            accelStep = constrain(accel, 1, 255);
+            decelStep = constrain(decel, 1, 255);
+            kickPwm = fields >= 3 ? constrain(kick, 0, 200) : 0;
+            char reply[40];
+            snprintf(reply, sizeof(reply), "ACK RAMP %d %d %d", accelStep, decelStep, kickPwm);
+            sendReply(reply);
+          }
+          else
+            sendReply("ERR RAMP FORMAT");
         }
         else if (packet[0] == 'M')
         {
@@ -307,19 +361,40 @@ namespace
     }
   }
 
+  // Move one wheel one step toward its target. Speeding up uses accelStep and
+  // slowing down (including reversing) uses decelStep. With kickPwm > 0 a start
+  // jumps straight past the motor's dead zone and a stop cuts to zero once the
+  // wheel is that slow, so the ramp is spent where the wheel actually moves.
+  void rampWheel(int &current, int target)
+  {
+    if (current == target)
+      return;
+    if (current == 0 && kickPwm > 0)
+    {
+      current = target > 0 ? min(kickPwm, target) : max(-kickPwm, target);
+      return;
+    }
+    const bool sameSign = (current > 0 && target > 0) || (current < 0 && target < 0);
+    const bool speedingUp = current == 0 || (sameSign && abs(target) > abs(current));
+    if (!speedingUp && kickPwm > 0 && abs(current) <= kickPwm && (target == 0 || !sameSign))
+    {
+      current = 0;
+      return;
+    }
+    const int step = speedingUp ? accelStep : decelStep;
+    if (current < target)
+      current = min(current + step, target);
+    else
+      current = max(current - step, target);
+  }
+
   void updateMotors()
   {
     if (millis() - lastMotorUpdate < MOTOR_UPDATE_MS)
       return;
     lastMotorUpdate = millis();
-    if (currentLeft < targetLeft)
-      currentLeft = min(currentLeft + ACCEL_STEP, targetLeft);
-    else if (currentLeft > targetLeft)
-      currentLeft = max(currentLeft - ACCEL_STEP, targetLeft);
-    if (currentRight < targetRight)
-      currentRight = min(currentRight + ACCEL_STEP, targetRight);
-    else if (currentRight > targetRight)
-      currentRight = max(currentRight - ACCEL_STEP, targetRight);
+    rampWheel(currentLeft, targetLeft);
+    rampWheel(currentRight, targetRight);
     driveWheels(currentLeft, currentRight);
   }
 } // namespace
@@ -340,10 +415,11 @@ void setup()
     Serial.println("Motor PWM attach failed; wheel commands are disabled.");
     showStatus("Motor PWM error");
   }
+  // Set frequency and resolution for the servo pin
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-  servoReady = ledcAttachChannel(SERVO_PIN, SERVO_HZ, SERVO_BITS, SERVO_CHANNEL);
+  servoReady = ledcAttach(SERVO_PIN, PWM_FREQ, PWM_RESOLUTION);
 #else
-  ledcSetup(SERVO_CHANNEL, SERVO_HZ, SERVO_BITS);
+  ledcSetup(SERVO_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
   ledcAttachPin(SERVO_PIN, SERVO_CHANNEL);
   servoReady = true;
 #endif
@@ -392,6 +468,11 @@ void loop()
   {
     targetLeft = targetRight = 0;
     showStatus("Watchdog stop");
+  }
+  if (servoPowered && millis() - lastHostPacket > SERVO_IDLE_RELEASE_MS)
+  {
+    releaseServo(); // host quit or crashed: do not leave the servo holding power
+    showStatus("Gripper off");
   }
   updateMotors();
 }

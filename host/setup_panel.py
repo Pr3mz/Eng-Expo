@@ -28,7 +28,7 @@ class SetupPanel:
 
     def open(self) -> None:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, 520, 800)
+        cv2.resizeWindow(WINDOW, 520, 1040)
         for field in robot_settings.FIELDS:
             position = int(round(self.values[field.key] * field.scale))
             cv2.createTrackbar(field.label, WINDOW, min(max(position, field.low), field.high),
@@ -98,8 +98,8 @@ class SetupPanel:
             ("Green circle = gripper (length, size)", (0, 255, 0)),
             ("Orange circle = robot size, dot = rear", (0, 165, 255)),
             ("mm per px = arena width in mm / 800", (180, 180, 180)),
-            ("Servo TEST moves the gripper live: find the", (255, 200, 0)),
-            ("spot, then copy it into Servo OPEN / CLOSE", (255, 200, 0)),
+            ("Servo TEST angle moves the gripper live: find", (255, 200, 0)),
+            ("the angle, then copy it into OPEN / CLOSE", (255, 200, 0)),
             ("Saved" if self._dirty_at is None else "Saving...", (0, 255, 0) if self._dirty_at is None else (0, 200, 255)),
         ]
         image = np.full((32 + 26 * len(lines), 520, 3), 30, dtype=np.uint8)

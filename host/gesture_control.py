@@ -18,6 +18,7 @@ class GestureController:
         self.last_arm_time = 0
         self.start_time = time.time()
         self.last_ts_ms = -1
+        self.fist_stop = False
         self._switch_armed = True   # gripper switch needs the gesture released between flips
 
     def detect_fingers(self, landmarks, hand_side):
@@ -42,9 +43,10 @@ class GestureController:
     def is_thumb_and_pinky(self, f): return f["thumb"] and not f["index"] and not f["middle"] and not f["ring"] and f["pinky"]
     def is_L_shape(self, f): return f["thumb"] and f["index"] and not f["middle"] and not f["ring"] and not f["pinky"]
     def is_index_pinky(self, f): return f["index"] and f["pinky"] and not f["middle"] and not f["ring"]  # thumb ignored
-    def is_three_fingers(self, f): return not f["thumb"] and f["index"] and f["middle"] and f["ring"] and not f["pinky"]
+    def is_three_fingers(self, f): return not f["thumb"] and not f["index"] and f["middle"] and f["ring"] and f["pinky"]  # middle + ring + pinky
     def is_four_fingers(self, f): return not f["thumb"] and f["index"] and f["middle"] and f["ring"] and f["pinky"]
     def is_five(self, f): return all(f.values())
+    def is_fist(self, f): return not any(f.values())   # no fingers up
 
     def process_frame(self, frame, is_grabbed):
         """Processes frame, draws hands, and returns (cmd_char, new_is_grabbed) or None"""
@@ -62,6 +64,7 @@ class GestureController:
         res = self.hands.detect_for_video(mp_image, ts_ms)
         
         cmd = 'S'
+        self.fist_stop = False   # True when a closed fist (no fingers) asks for an immediate stop
         new_is_grabbed = is_grabbed
         left_f = None
         right_f = None
@@ -126,6 +129,10 @@ class GestureController:
                 if self.is_five(right_f): cmd = 'S'
                 elif self.is_four_fingers(right_f): cmd = 'R'
                 
+            # A closed fist (no fingers up) with no drive gesture = stop right now.
+            if cmd == 'S' and ((L and self.is_fist(left_f)) or (R and self.is_fist(right_f))):
+                self.fist_stop = True
+
         # To show the tracking correctly, we must flip it back to match the original camera orientation
         # (Otherwise the user sees a mirrored window, which might conflict with Final1.py's window)
         frame[:] = cv2.flip(frame_flipped, 1)

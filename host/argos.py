@@ -21,9 +21,11 @@ import cv2
 import numpy as np
 
 from camera_stream import LatestFrameCamera
-from navigation_math import wrap_angle
+from navigation_math import heading_error, wrap_angle
 import robot_settings
 from setup_panel import SetupPanel
+from manual_smoothing import GestureSmoother
+from pilot import Pilot
 from robot_link import RobotLink
 from safety import auto_preflight_blockers
 from sorter_planner import SorterPlanner
@@ -38,14 +40,18 @@ from vision import (
 )
 
 WARP_W = 800
-WARP_H = 600
+WARP_H = 600   # recomputed below from the real arena size when it is set
 ZONE_RADIUS_PX = 48
 ZONE_EXCLUSION_RADIUS_PX = 115
 # Robot size, gripper geometry, scale and drive speeds live in
 # robot_settings.json; press G for the slider panel. This rover did not move
 # at PWM 90 or 145 on the floor, so keep creep_speed high and pulses short.
 CFG = robot_settings.load()
-CFG["servo_test_us"] = CFG["servo_open_us"]   # live tester starts at the open position
+CFG["servo_test_deg"] = CFG["servo_open_deg"]   # live tester starts at the open position
+if CFG["arena_width_mm"] > 0 and CFG["arena_height_mm"] > 0:
+    # Warp to the arena's true proportions so angles and distances in the
+    # top-down view are real (a 4:3 warp of a 16:9 field bends every heading).
+    WARP_H = max(200, min(900, int(round(WARP_W * CFG["arena_height_mm"] / CFG["arena_width_mm"]))))
 NEAR_TARGET_MARGIN_MM = 150
 ANGLE_THRESHOLD = math.radians(float(os.getenv("ANGLE_THRESHOLD_DEG", "20")))
 CAMERA_API = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
@@ -89,20 +95,20 @@ def apply_settings(args) -> None:
 
 
 def grip_command(close: bool) -> str:
-    """Gripper move to the saved open/close pulse width (robot command G <us>)."""
-    return f"G {int(CFG['servo_close_us' if close else 'servo_open_us'])}"
+    """Gripper move to the saved open/close angle (robot command SERVO <angle>)."""
+    return f"SERVO {int(CFG['servo_close_deg' if close else 'servo_open_deg'])}"
 
 
-def manual_speed(command: str, held_s: float = 1e9) -> int:
-    """Forward/reverse go straight to full speed (the firmware eases in over
-    ~0.1 s). Turns ramp from turn_start_speed up to manual_turn_speed over
-    turn_ramp_s seconds so they start gently."""
-    if command not in "LR":
-        return int(CFG["manual_speed"])
-    top, start, ramp = CFG["manual_turn_speed"], min(CFG["turn_start_speed"], CFG["manual_turn_speed"]), CFG["turn_ramp_s"]
-    if ramp <= 0:
-        return int(top)
-    return int(start + (top - start) * min(1.0, held_s / ramp))
+def manual_speed(command: str, held_s: float | None = None) -> int:
+    """Manual drive power. Forward/backward use the plain set speed. Turning, with
+    `held_s`, ramps from (speed - accel) to (speed + accel) over manual_accel_s
+    seconds after the gesture starts: a gentle start that never waits to move."""
+    speed = CFG["manual_turn_speed"] if command in "LR" else CFG["manual_speed"]
+    accel = CFG["manual_accel_pwm"] if command in "LR" else 0   # only turning accelerates
+    if held_s is not None and accel > 0:
+        fraction = min(1.0, max(0.0, held_s / max(0.1, CFG["manual_accel_s"])))
+        speed = speed - accel + 2.0 * accel * fraction
+    return int(max(0, min(255, round(speed))))
 
 
 def gripper_point_from_heading(x: float, y: float, heading: float, distance_px: float) -> tuple[int, int]:
@@ -244,7 +250,8 @@ def run_gripper_simulator(distance_px: float, radius_px: float) -> int:
 
 
 class ArenaSetup:
-    def __init__(self, calibration_path: Path | None = None, camera_index: int = 0):
+    def __init__(self, calibration_path: Path | None = None, camera_index: int = 0, required: int = 4):
+        self.required = required   # number of drop circles that must be marked
         self.calibration_path = calibration_path
         self.camera_index = camera_index
         self.corners: list[tuple[int, int]] = []
@@ -273,6 +280,11 @@ class ArenaSetup:
             corners = data.get("corners", [])
             zones = data.get("zones", {})
             home_center = data.get("home_center")
+            if data.get("warp_h", 600) != WARP_H:
+                # Circle positions are stored in the warped view, which changed shape.
+                if zones or home_center:
+                    print("Arena size changed since the last run: drop circles and home must be marked again.")
+                zones, home_center = {}, None
             if not isinstance(corners, list) or len(corners) > 4 or not isinstance(zones, dict):
                 raise ValueError("invalid calibration layout")
             corners = [self._point(point) for point in corners]
@@ -291,14 +303,14 @@ class ArenaSetup:
             self.corners = corners
             self.zones = zones
             self.home_center = home_center
-            print(f"Restored arena calibration: {len(corners)}/4 corners, {len(zones)}/{len(vision.PALETTE)} colors ({", ".join(vision.PALETTE)}). Press Z to remap circles or R to clear all.")
+            print(f"Restored arena calibration: {len(corners)}/4 corners, {len(zones)}/{self.required} drop circles ({', '.join(zones) or 'none'}). Press Z to remap circles or R to clear all.")
         except (OSError, ValueError, TypeError, KeyError) as exc:
             print(f"Ignoring saved arena calibration: {exc}")
 
     def _save(self):
         if self.calibration_path is None:
             return
-        data = {"version": 1, "camera_index": self.camera_index,
+        data = {"version": 1, "camera_index": self.camera_index, "warp_h": WARP_H,
                 "corners": self.corners, "zones": self.zones,
                 "home_center": self.home_center}
         temporary = self.calibration_path.with_name(self.calibration_path.name + ".tmp")
@@ -333,8 +345,7 @@ class ArenaSetup:
         self.zones.clear()
         self.sample_image = None
         self._save()
-        print("Drop-zone marks cleared; arena corners kept. Click the center of each active colored circle again:")
-        print(", ".join(vision.PALETTE))
+        print(f"Drop-zone marks cleared; arena corners kept. Click the center of each of the {self.required} drop circles again.")
 
     def click(self, event, x, y, _flags, _param):
         if event != cv2.EVENT_LBUTTONDOWN:
@@ -349,11 +360,10 @@ class ArenaSetup:
                     self.corners.clear()
                     self._save()
                     return
-                print("Arena rectified. Click the center of each drop circle in this order:")
-                print(", ".join(vision.PALETTE))
+                print(f"Arena rectified. Click the center of each of the {self.required} drop circles (any order; the color is read from the camera).")
             self._save()
             return
-        if len(self.zones) < len(vision.PALETTE):
+        if len(self.zones) < self.required:
             if any(math.dist((x, y), center) < 70 for center in self.zones.values()):
                 print("Drop-zone centers are too close together; click a different circle center.")
                 return
@@ -464,7 +474,7 @@ def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOW
     if manual_mode:
         lines = [
             "MANUAL MODE (GESTURE CONTROL v1.3.0)",
-            "Gestures: both open=FWD  both 3 fingers=REV  4 fingers L/R hand=TURN  index+pinky=GRIPPER switch",
+            "Gestures: both open=FWD  both hands middle+ring+pinky=REV  4 fingers L/R hand=TURN  index+pinky=GRIPPER  fist=STOP",
             f"Command: {manual_command} | Gripper: {'CLOSED' if gesture_is_grabbed else 'OPEN'} | [ SPACEBAR ] to AUTO",
         ]
     elif setup is not None:
@@ -474,12 +484,11 @@ def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOW
                 "Click the 4 corners of the arena on the screen.",
                 orig_lines[2] if len(orig_lines) > 2 else "Shortcuts: [Q] Quit | [M] Manual | [,] Exposure"
             ]
-        elif len(setup.zones) < len(vision.PALETTE):
-            missing = [c for c in vision.PALETTE if c not in setup.zones]
+        elif len(setup.zones) < setup.required:
             lines = [
-                f"STEP 2: SETUP DROP ZONES ({len(setup.zones)}/{len(vision.PALETTE)})",
-                "Click the center of the colored drop zones.",
-                f"Need: {', '.join(missing)}",
+                f"STEP 2: SETUP DROP ZONES ({len(setup.zones)}/{setup.required})",
+                "Click the center of each colored drop circle.",
+                f"Need: {setup.required - len(setup.zones)} more" + (f" | marked: {', '.join(setup.zones)}" if setup.zones else ""),
                 "Shortcuts: [Z] Zones | [R] Reset | [,] Exposure"
             ]
         elif not auto_enabled:
@@ -568,6 +577,10 @@ def main():
                         help="virtual gripper capture/search radius in warped-image pixels")
     parser.add_argument("--colors", default=",".join(vision.PALETTE),
                         help=f"comma list of stone colors to sort (default from ARGOS_COLORS); choose from {', '.join(vision.ALL_COLORS)}")
+    parser.add_argument("--sites", type=int, default=int(os.getenv("ARGOS_SITES", "4")),
+                        help="number of drop circles on the field (the colors of the circles you click are the colors that get sorted)")
+    parser.add_argument("--no-gripper", action="store_true",
+                        help="test driving without the gripper servo: no servo commands, each stone is visited once")
     parser.add_argument("--detector", choices=("hsv", "roboflow"), default=os.getenv("ARGOS_DETECTOR", "hsv"),
                         help="stone detector: local HSV (default, offline) or Roboflow cloud with HSV fallback")
     parser.add_argument("--home-distance-mm", type=positive_float, default=70.0,
@@ -583,7 +596,9 @@ def main():
     diagnostics = parser.add_mutually_exclusive_group()
     diagnostics.add_argument("--scan-cameras", action="store_true", help="list usable camera indices without connecting to the robot")
     diagnostics.add_argument("--check-robot", action="store_true", help="test safe UDP discovery without opening a camera or moving")
-    scale_text = os.getenv("MM_PER_PIXEL", "").strip() or (str(CFG["mm_per_pixel"]) if CFG["mm_per_pixel"] > 0 else "")
+    arena_scale = CFG["arena_width_mm"] / WARP_W if CFG["arena_width_mm"] > 0 and CFG["arena_height_mm"] > 0 else 0.0
+    scale_text = (os.getenv("MM_PER_PIXEL", "").strip()
+                  or (f"{arena_scale:.6f}" if arena_scale else (str(CFG["mm_per_pixel"]) if CFG["mm_per_pixel"] > 0 else "")))
     try:
         scale_default = positive_float(scale_text) if scale_text else None
         drop_distance = positive_float(os.getenv("DROP_DISTANCE_MM") or str(CFG["drop_distance_mm"]))
@@ -596,7 +611,12 @@ def main():
         vision.set_palette(tuple(args.colors.split(",")))
     except ValueError as exc:
         parser.error(str(exc))
-    print(f"Sorting colors: {', '.join(vision.PALETTE)} | detector: {args.detector}")
+    if args.sites < 1:
+        parser.error("--sites must be at least 1")
+    if args.detector == "roboflow" and not vision.RF_API_KEY:
+        print("[RF] ROBOFLOW_API_KEY is not set; using local HSV detection instead.", flush=True)
+        args.detector = "hsv"
+    print(f"Drop circles: {args.sites} | detector: {args.detector}" + (" | NO GRIPPER (servo commands off)" if args.no_gripper else ""))
     # Force UI-friendly defaults so user can just double-click to run
     args.enable_auto = True
     args.confirm_motion = True
@@ -625,7 +645,7 @@ def main():
         return 2
 
     link = RobotLink(marker_id=args.marker_id, robot_ip=args.robot_ip)
-    setup = ArenaSetup(CALIBRATION_PATH, args.camera_index)
+    setup = ArenaSetup(CALIBRATION_PATH, args.camera_index, required=args.sites)
     if args.reset_zones:
         setup.clear_zones()
     rf_executor = ThreadPoolExecutor(max_workers=1)
@@ -640,16 +660,46 @@ def main():
     gesture_controller = GestureController() if GestureController is not None else None
     gesture_is_grabbed = False
     setup_panel = SetupPanel(CFG)
-    servo_test = {"sent": int(CFG["servo_test_us"]), "at": 0.0}
-    gripper_homed = False   # the firmware sends no servo pulse at boot, so open it once we are connected
+    servo_test = {"sent": int(CFG["servo_test_deg"]), "at": 0.0}
+    gesture_smoother = GestureSmoother(confirm_frames=1)
+    manual_move_start = 0.0
+    ramp = {"mode": None, "at": 0.0}
+
+    def sync_ramp() -> None:
+        """Wheel ramp on the robot: none in manual (instant response), the original ramp for auto."""
+        mode = "manual" if manual_mode else "auto"
+        now = time.monotonic()
+        if not link.is_online or (ramp["mode"] == mode and now - ramp["at"] < 2.0):
+            return
+        if mode == "manual":
+            link.send("RAMP 255 255 0")
+        else:
+            link.send("RAMP 25 25 0")
+        ramp["mode"], ramp["at"] = mode, now
+
+    gripper_homed = args.no_gripper   # the firmware sends no servo pulse at boot, so open it once we are connected
+    grip = {"homed_at": 0.0, "released": args.no_gripper, "used": False}
+
+    def send_grip(command: str) -> None:
+        if args.no_gripper:
+            return
+        link.send(command)
+        grip["used"] = True
+
+    def release_gripper() -> None:
+        """Servo power off: stops the pulse train so it holds no current."""
+        if link.robot_ip:
+            for _ in range(3):   # UDP can drop a packet; the robot also auto-releases when we go silent
+                link.sock.sendto(b"GOFF", (link.robot_ip, link.port))
+                time.sleep(0.03)
 
     def sync_servo_test() -> None:
         """Move the gripper servo live while the TEST slider is dragged."""
-        value = int(CFG["servo_test_us"])
+        value = int(CFG["servo_test_deg"])
         now = time.monotonic()
         # Rate-limited: every write restarts the servo PWM wave on the robot.
         if value != servo_test["sent"] and now - servo_test["at"] >= 0.15 and link.is_online:
-            link.send(f"G {value}")
+            send_grip(f"SERVO {value}")
             servo_test["sent"], servo_test["at"] = value, now
 
     def change_exposure(delta: float) -> None:
@@ -673,9 +723,13 @@ def main():
 
     auto_enabled = False
     manual_mode = False
-    planner = SorterPlanner(grip_dwell_s=2.5, drop_dwell_s=1.5)
+    planner = SorterPlanner(
+        grip_dwell_s=0.6 if args.no_gripper else 2.5,
+        drop_dwell_s=0.6 if args.no_gripper else 1.5,
+        skip_picked=args.no_gripper,
+    )
+    pilot = Pilot()
     manual_command = "S"
-    move_start_time = 0.0
     manual_deadline = 0.0
     stable_pose_frames = 0
     pose_misses = 0
@@ -694,7 +748,7 @@ def main():
     os.makedirs(CAPTURE_DIR / "raw", exist_ok=True)
     os.makedirs(CAPTURE_DIR / "annotated", exist_ok=True)
     
-    print(f"Click the four arena corners in the raw camera view. After the warp appears, click the center of each active target circle ({', '.join(vision.PALETTE)}) in any order; its color label is read from the camera.")
+    print(f"Click the four arena corners in the raw camera view. After the warp appears, click the center of each of the {args.sites} drop circles in any order; the color is read from the camera.")
     print("Manual check works before arena calibration: focus this window, press M, use Hand Gestures to drive and toggle gripper.")
     print("Camera setup: [ darker | ] brighter (clears zone marks); Z clears zones only; R clears corners and zones.")
     print("Home: place the stopped rover at field center and press H to save its marker position; press B during Auto to return there and restart. Q/window close stops immediately.")
@@ -704,11 +758,21 @@ def main():
     try:
         while True:
             link.discover()
+            if not manual_mode:
+                gesture_smoother.reset()
+            sync_ramp()
             if not gripper_homed and link.is_online:
                 link.send(grip_command(False))
+                grip["homed_at"] = time.monotonic()
                 gripper_homed = True
                 gesture_is_grabbed = False
-                print(f"Gripper set to open ({int(CFG['servo_open_us'])} us)", flush=True)
+                print(f"Gripper set to open ({int(CFG['servo_open_deg'])} deg)", flush=True)
+            if (gripper_homed and not grip["released"] and not grip["used"]
+                    and time.monotonic() - grip["homed_at"] >= 1.0 and link.is_online):
+                # Opened at start; the servo needs no holding power while idle.
+                release_gripper()
+                grip["released"] = True
+                print("Gripper servo power off (idle)", flush=True)
             if manual_command != "S" and time.monotonic() > manual_deadline:
                 manual_command = "S"
             raw, frame_age, frozen, camera_error = camera.read_latest()
@@ -766,19 +830,27 @@ def main():
                 link.discover()  # Keep discovering/polling so robot stays connected
                 if gesture_controller:
                     cmd, gesture_is_grabbed = gesture_controller.process_frame(raw_view, gesture_is_grabbed)
-                    
-                    if cmd in ('F', 'B', 'L', 'R'):
-                        now = time.monotonic()
-                        if cmd != manual_command:
-                            move_start_time = now
-                        manual_command = cmd
+                    now = time.monotonic()
+                    if cmd in ('C', 'O'):
+                        send_grip(grip_command(cmd == 'C'))   # gripper switch; driving carries on
+                    # Debounced: a one-frame glitch neither starts nor stops the robot.
+                    move = gesture_smoother.update(cmd, now, CFG["gesture_hold_s"],
+                                                   stop_now=getattr(gesture_controller, "fist_stop", False))
+                    if move != 'S':
+                        if move != manual_command:
+                            manual_move_start = now
+                        manual_command = move
                         manual_deadline = now + 0.3
-                        link.drive(manual_command, speed=manual_speed(manual_command, now - move_start_time))
-                    elif cmd in ('C', 'O'):
-                        manual_command = cmd
-                        link.send(grip_command(cmd == 'C'))
+                        # Forward/backward start a moment after the gesture is first
+                        # seen (no acceleration); turning ramps instead. Stay stopped
+                        # while waiting, even if a different move was running.
+                        start_delay = CFG["fb_delay_s"] if move in "FB" else 0.0
+                        if now - manual_move_start < start_delay:
+                            link.stop()
+                        else:
+                            link.drive(manual_command, speed=manual_speed(manual_command, now - manual_move_start))
                     else:
-                        # Gesture is 'S' or no hands — STOP immediately
+                        # No confirmed drive gesture: stop (the robot ramps down smoothly)
                         if manual_command != 'S':
                             manual_command = 'S'
                             if link.robot_ip:
@@ -850,7 +922,7 @@ def main():
                     manual_command = "S"
                     manual_deadline = 0.0
                     link.stop()
-                    link.send(grip_command(key != ord("o")))
+                    send_grip(grip_command(key != ord("o")))
                 continue
 
             view = cv2.warpPerspective(raw, setup.homography, (WARP_W, WARP_H))
@@ -899,7 +971,7 @@ def main():
                 cv2.putText(view, "ROBOT SIZE", (pose.x - 45, pose.y + int(CFG["robot_radius_px"]) + 18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, cv2.LINE_AA)
 
-            zones_ready = len(setup.zones) == len(vision.PALETTE)
+            zones_ready = len(setup.zones) >= setup.required
             excluded_regions = [(center, ZONE_EXCLUSION_RADIUS_PX) for center in setup.zones.values()]
             if pose:
                 excluded_regions.extend(
@@ -926,8 +998,9 @@ def main():
                     excluded_regions=tuple(excluded_regions),
                     color_zones=setup.zones,
                 )
-            # Filter gems to only allow colors in vision.PALETTE
-            gems = [g for g in last_gems if g.color in vision.PALETTE]
+            # Only stones whose color has a marked drop circle matter.
+            active_colors = set(setup.zones) or set(vision.PALETTE)
+            gems = [g for g in last_gems if g.color in active_colors]
             auto_blockers = auto_preflight_blockers(
                 auto_requested=args.enable_auto,
                 motion_confirmed=args.confirm_motion or args.allow_untested_motion,
@@ -947,6 +1020,7 @@ def main():
                         print("AUTO STARTED: returning to HOME, then restarting search", flush=True)
                     else:
                         planner.reset()
+                        planner.clear_memory()
                         print("AUTO STARTED: live preflight passed", flush=True)
                 elif time.monotonic() > auto_start_deadline:
                     auto_start_pending = False
@@ -1011,6 +1085,7 @@ def main():
             command = "S"
             reason = "STOPPED"
             auto_distance_mm = None
+            pilot_drive = None
             if safety_reason:
                 reason = safety_reason
             elif view_recovery_reason is not None:
@@ -1035,13 +1110,29 @@ def main():
                     reference_point = ((pose.x, pose.y) if planner.phase == "home"
                                        else (gripper_point or (pose.x, pose.y)))
                     auto_distance_mm = math.dist(reference_point, decision.target) * args.mm_per_pixel
+                if decision.target is not None and pose is not None and decision.command in "FLR":
+                    # Continuous smooth steering instead of stop-and-go pulses.
+                    stop_mm = (args.home_distance_mm if planner.phase == "home"
+                               else args.drop_distance_mm if planner.phase == "deliver"
+                               else args.pickup_distance_mm)
+                    pilot.cfg.min_pwm = CFG["auto_min_pwm"]
+                    pilot.cfg.cruise_pwm = max(CFG["auto_cruise_pwm"], CFG["auto_min_pwm"])
+                    pilot.cfg.spin_max_pwm = max(CFG["auto_spin_pwm"], CFG["auto_min_pwm"])
+                    forward, turn, pilot_mode = pilot.update(
+                        heading_error((pose.x, pose.y), pose.heading, decision.target),
+                        auto_distance_mm, stop_mm, time.monotonic(),
+                        gripper_error=heading_error(reference_point, pose.heading, decision.target),
+                    )
+                    pilot_drive = (forward, turn)
+                    command = "P"
+                    reason += f" | {pilot_mode} fwd {forward:.0f} turn {turn:+.0f}"
                 if decision.action is not None:
                     now = time.monotonic()
                     if decision.action != getattr(link, "last_action", None) or now - getattr(link, "last_action_time", 0) > 1.0:
-                        link.send(grip_command(decision.action == "CLOSE"))
+                        send_grip(grip_command(decision.action == "CLOSE"))
                         link.last_action = decision.action
                         link.last_action_time = now
-                if decision.target is not None and command in "FBLR":
+                if decision.target is not None and command in "FBLRP":
                     cv2.line(view, gripper_point or (pose.x, pose.y), decision.target, (0, 255, 255), 2)
             elif zones_ready and pose and gems:
                 detail = f"auto blocked: {auto_blockers[0]}" if auto_blockers else "press A to start"
@@ -1063,7 +1154,7 @@ def main():
                 near_target = (stop_distance_mm is not None
                                and auto_distance_mm <= stop_distance_mm + NEAR_TARGET_MARGIN_MM)
 
-            if auto_enabled and command in "FBLR" and pose:
+            if auto_enabled and command in "FBLRP" and pose:
                 now = time.monotonic()
                 # Creep pulses near a target move only a few pixels per
                 # frame by design, well under the 5px/2.5s bar tuned for
@@ -1079,33 +1170,29 @@ def main():
                     stuck_recovery_used = False
                     stuck_recovery_count = 0
                 elif now - motion_reference_at > stuck_timeout_s:
-                    if not stuck_recovery_used:
-                        # Likely wedged against a stone or drop-circle rim.
-                        # Back away, pivot slightly, then keep the same planner
-                        # target/color and let it re-approach.
-                        stuck_recovery_used = True
-                        stuck_recovery_count += 1
-                        motion_reference_at = now
-                        reason = f"AUTO RECOVERY {stuck_recovery_count}: backing up and changing approach"
-                        print(reason, flush=True)
-                        if link.is_online:
-                            link.drive("B", speed=int(CFG["creep_speed"]))
-                            time.sleep(0.22)
-                            link.stop()
-                            turn = "L" if stuck_recovery_count % 2 else "R"
-                            link.drive(turn, speed=int(CFG["creep_speed"]))
-                            time.sleep(0.14)
-                            link.stop()
-                        command = "S"
-                    else:
-                        # Keep Auto armed and preserve the active gemstone or
-                        # delivery color. Wait longer after repeated recovery
-                        # attempts, then try the same target again.
-                        motion_reference_at = now + 5.0
-                        stuck_recovery_used = False
-                        command = "S"
-                        reason = "AUTO WAIT: still blocked; holding target and retrying"
-                        print(reason, flush=True)
+                    # Wedged against a stone, a drop-circle rim or the wall.
+                    # Reverse (further each time it happens again), turn to a
+                    # new side, and when hunting a stone pick a different one
+                    # so the next approach takes a new route.
+                    stuck_recovery_count += 1
+                    stuck_recovery_used = True
+                    back_s = min(0.35 + 0.15 * (stuck_recovery_count - 1), 0.9)
+                    turn_sign = 1.0 if stuck_recovery_count % 2 else -1.0
+                    new_target = planner.avoid_current(now)
+                    reason = (f"AUTO STUCK {stuck_recovery_count}: reversing {back_s:.2f}s, turning "
+                              f"{'left' if turn_sign > 0 else 'right'}"
+                              + (", trying another stone" if new_target else ", re-approaching"))
+                    print(reason, flush=True)
+                    if link.is_online:
+                        link.drive_mix(-CFG["auto_min_pwm"], 0.0)
+                        time.sleep(back_s)
+                        link.drive_mix(0.0, turn_sign * CFG["auto_spin_pwm"])
+                        time.sleep(0.3)
+                        link.stop()
+                    pilot.reset()
+                    motion_reference_pose = None
+                    motion_reference_at = time.monotonic()
+                    command = "S"
             else:
                 motion_reference_pose = None
                 stuck_recovery_used = False
@@ -1133,20 +1220,17 @@ def main():
                     link.stop()
                     if view_recovery_count >= VIEW_RECOVERY_MAX_PULSES:
                         reason = "AUTO HOLD: view not reacquired; waiting for the marker"
-            elif command in "FBLR" and (auto_enabled or manual_command != "S"):
+            elif command in "FBLRP" and (auto_enabled or manual_command != "S"):
                 if link.is_online:
                     if auto_enabled:
-                        # The camera/vision loop is slower than the wheels.
-                        # Move a short, bounded amount, stop, and let the next
-                        # camera frame determine the following command. Slow
-                        # down well before the stop threshold so the robot
-                        # eases up to a gem or drop circle instead of lunging
-                        # through it at full speed.
-                        drive_speed = int(CFG["creep_speed"] if near_target else CFG["cruise_speed"])
-                        pulse_s = 0.25 if command in "FB" else 0.18
-                        link.drive(command, speed=drive_speed)
-                        time.sleep(pulse_s)
-                        link.stop()
+                        # Continuous drive: the pilot recomputes wheel power every
+                        # camera frame, so there is no blocking sleep and no pulsing.
+                        if pilot_drive is not None:
+                            link.drive_mix(*pilot_drive)
+                        elif command == "B":      # planner's short back-up after a drop
+                            link.drive_mix(-CFG["auto_min_pwm"], 0)
+                        else:
+                            link.stop()
                     else:
                         link.drive(command, speed=manual_speed(command))
                 else:
@@ -1157,6 +1241,8 @@ def main():
                     link.stop()
             else:
                 link.stop()
+            if command != "P":
+                pilot.reset()
             manual_hint = " | press M to exit manual before A arms auto" if manual_mode else ""
             draw_status(view, [
                 reason,
@@ -1248,7 +1334,7 @@ def main():
                 manual_deadline = 0.0
                 link.stop()
                 if link.is_online:
-                    link.send(grip_command(key != ord("o")))
+                    send_grip(grip_command(key != ord("o")))
                 else:
                     print("Gripper command blocked: no fresh ESP32 reply")
             elif key == ord("["):
@@ -1285,6 +1371,7 @@ def main():
                             print("Sorting mode started: returning to HOME first")
                         else:
                             planner.reset()
+                            planner.clear_memory()
                             print("Sorting mode started")
                 link.stop()
             elif key in (ord("g"), ord("G")):
@@ -1299,6 +1386,10 @@ def main():
                 print("Arena calibration cleared.")
     finally:
         setup_panel.close()
+        link.stop()
+        link.send("RAMP 25 25 0")   # leave the robot with its original wheel ramp
+        release_gripper()           # never leave the gripper servo powered after quitting
+        print("Gripper servo power off (quit)", flush=True)
         link.close()
         camera.release()
         rf_executor.shutdown(wait=False, cancel_futures=True)

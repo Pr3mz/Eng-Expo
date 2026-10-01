@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import math
 
 from navigation_math import heading_error, steering_command
-import vision
 from vision import Gem, RobotPose
 
 
@@ -26,11 +25,32 @@ class SorterPlanner:
     decisions can be tested offline before enabling the hardware loop.
     """
 
-    def __init__(self, *, grip_dwell_s: float = 1.0, drop_dwell_s: float = 1.0, retreat_dwell_s: float = 0.8):
+    def __init__(self, *, grip_dwell_s: float = 1.0, drop_dwell_s: float = 1.0, retreat_dwell_s: float = 0.8,
+                 skip_picked: bool = False, picked_radius_px: float = 30.0):
         self.grip_dwell_s = grip_dwell_s
         self.drop_dwell_s = drop_dwell_s
         self.retreat_dwell_s = retreat_dwell_s
+        # Without a working gripper a "picked" stone stays on the field; remember
+        # where we went so the next cycle visits a different stone.
+        self.skip_picked = skip_picked
+        self.picked_radius_px = picked_radius_px
+        self.picked: list[tuple[int, int]] = []
+        # Stones the robot got stuck on: skipped until the time stored with them.
+        self.avoided: list[tuple[int, int, float]] = []
         self.reset()
+
+    def avoid_current(self, now: float, seconds: float = 20.0) -> bool:
+        """Give up on the stone being approached for a while so another is chosen."""
+        if self.phase != "search" or self.active_gem is None:
+            return False
+        self.avoided.append((self.active_gem.x, self.active_gem.y, now + seconds))
+        self.active_gem = None
+        return True
+
+    def clear_memory(self) -> None:
+        """Forget visited and avoided stones (fresh Auto start)."""
+        self.picked.clear()
+        self.avoided.clear()
 
     def reset(self) -> None:
         self.phase = "search"
@@ -82,8 +102,19 @@ class SorterPlanner:
     ) -> PlanDecision:
         if pose is None:
             return PlanDecision("S", "STOP: robot marker not visible", phase=self.phase)
-        if any(color not in zones for color in vision.PALETTE):
-            return PlanDecision("S", f"STOP: set drop circles ({len(zones)}/{len(vision.PALETTE)})", phase=self.phase)
+        if not zones:
+            return PlanDecision("S", "STOP: set the drop circles", phase=self.phase)
+        # Only stones whose color has a drop circle are sorted.
+        self.avoided = [entry for entry in self.avoided if entry[2] > now]
+        gems = [
+            gem for gem in gems
+            if not any(math.hypot(gem.x - ax, gem.y - ay) <= 40 for ax, ay, _until in self.avoided)
+        ]
+        gems = [
+            gem for gem in gems
+            if gem.color in zones
+            and not any(math.hypot(gem.x - px, gem.y - py) <= self.picked_radius_px for px, py in self.picked)
+        ]
         if mm_per_pixel is None or not math.isfinite(mm_per_pixel) or mm_per_pixel <= 0:
             return PlanDecision("S", "STOP: measured scale not configured", phase=self.phase)
 
@@ -161,6 +192,8 @@ class SorterPlanner:
                 )
             if self.phase == "search" and self.active_gem is not None:
                 self.carrying_color = self.active_gem.color
+                if self.skip_picked:
+                    self.picked.append((self.active_gem.x, self.active_gem.y))
                 self.phase = "grip"
                 self.action_deadline = now + self.grip_dwell_s
                 return PlanDecision(

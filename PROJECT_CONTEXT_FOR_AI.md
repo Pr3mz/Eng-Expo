@@ -44,7 +44,7 @@ Layout: `host/` = Python (laptop), `firmware/src/` = ESP32 (built via root `plat
     *   *Logic:* Emits action commands (`F`, `B`, `L`, `R`, `C`, `O`). 
 *   **`robot_link.py`**: The UDP Network Layer.
     *   *Task:* Wraps Python `socket` to send commands to the ESP32 over a 2.4GHz hotspot.
-    *   *Crucial Variable:* `DRIVE_SIGN = {"F": (1, 1), ...}`. With the InEngMotor firmware "Forward" is positive PWM (`F: (1, 1)`). The table must match the motor code in the firmware: if the firmware motor driver changes, re-check direction on the real robot before changing it.
+    *   *Crucial Variable:* `DRIVE_SIGN = {"F": (-1, -1), "B": (1, 1), "L": (1, -1), "R": (-1, 1)}` (measured on the real robot). The table must match the motor code in the firmware: if the firmware motor driver changes, re-check direction on the real robot before changing it.
 *   **`gesture_control.py`**: The ML Hand Tracking module (MediaPipe).
 
 ### 3.2 Firmware (`firmware/src/ExpoRedCrObot.ino`)
@@ -74,7 +74,9 @@ If you are an AI generating code for this robot, you MUST adhere to these physic
     *   The Aruco marker is on the roof, but the gripper jaws are extended out front.
     *   `argos.py` now defaults `--gripper-distance-px` to `110` (override with the flag or env `GRIPPER_DISTANCE_PX`) so the AI targets the visual center of the jaws, not the center of the roof.
 4.  **Current Problem / Next Steps:**
-    *   **Current focus:** sorting 2 colors, **red (`crimson`) and violet**, end to end on the real field. Only those two drop circles are clicked in STEP 2.
+    *   **Current focus:** auto mode on a field with gems and **4 drop circles** (`--sites 4`). `vision.PALETTE` is all six colors by default; the planner only picks up gems whose color has a clicked drop circle. `--no-gripper` tests driving without the servo.
+    *   **Auto driving** is continuous: `host/pilot.py` (spin / arc / reverse, rate-limited, creeps up to targets) replaced the old blocking 0.25 s pulses. Steering aims from the robot centre; the gripper tip is only used for distance. Verify changes with `tools/sim_pilot.py`, `tools/sim_cycle.py` and `tools/smoke_auto.py`.
+    *   **Arena size:** set `arena_width_mm` / `arena_height_mm` in `host/robot_settings.json` so the warp keeps the real proportions (a fixed 4:3 warp bends every heading).
     *   Measured hues: red stones ≈ 177–179 / 0–4 (wraps), violet stones ≈ 150–165, orange stones ≈ 12–14 (their rims reach 9–10, inside the crimson range — handled by the rim check). The red arena wall also reads as crimson, so click arena corners *inside* the wall.
     *   Known gap: a clump of touching same-color stones merges into one blob larger than `max_area` and is skipped until the pile spreads.
     *   **Next milestone:** expand to all 6 colors by launching with `--colors crimson,violet,gold,lime,cyan,blue` and tuning on `tools/check_colors.py`.

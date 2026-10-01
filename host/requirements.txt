@@ -1,0 +1,4 @@
+numpy>=1.26
+opencv-contrib-python>=4.9
+mediapipe>=0.10        # gesture control (manual mode)
+inference-sdk>=1.7     # optional: only for --detector roboflow

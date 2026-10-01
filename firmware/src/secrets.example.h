@@ -1,0 +1,3 @@
+#pragma once
+#define ROBOT_WIFI_SSID "YOUR_VALUE_HERE"
+#define ROBOT_WIFI_PASS "YOUR_VALUE_HERE"

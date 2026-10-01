@@ -1,61 +1,75 @@
 # ARGOS (Autonomous Robotic Gemstone Overhead Sorter) 🏆
 
-This project contains the complete, field-ready Python overhead camera tracking system and ESP32 firmware for a six-color autonomous gem-sorting robot.
+Overhead-camera tracking system (Python, runs on the laptop) and ESP32 firmware for the gemstone color-sorting robot.
 
-Main executable: **`Field_Ready_Project/Final1.py`**
+Main program: **`host/argos.py`** — currently set to sort **2 colors: red (`crimson`) and violet (`violet`)**.
 
 ---
 
-## 🗺️ System Flowchart
+## 📁 Project Layout
 
-```mermaid
-flowchart TD
-    Start([Init Camera & UDP Link]) --> Check{Await User Command}
-
-    Check -->|Press M| Manual[Manual Mode]
-    Manual --> G[MediaPipe Hand Gesture Drive]
-    
-    Check -->|Press Spacebar| Auto[Autonomous Mode]
-    Auto --> Vision[Roboflow AI Detection]
-    Vision --"Gem & Robot Coordinates"--> Planner{State Machine}
-    
-    Planner -->|1| SeekGem[SEEKING_GEM: Drive to gem]
-    SeekGem -->|2| Grab[GRABBING_GEM: Close gripper]
-    Grab -->|3| SeekDrop[SEEKING_DROP: Drive to color zone]
-    SeekDrop -->|4| Drop[DROPPING_PAYLOAD: Open gripper & Reverse]
-    Drop -->|Loop| SeekGem
 ```
-
----
-
-## ✨ Features (Hybrid AI + CV Architecture)
-
-1. **AI Object Detection (Roboflow):** Cloud AI identification ignoring clutter.
-2. **Emergency CV Fallback:** Falls back to local HSV tracking if WiFi drops.
-3. **Hand Gesture Control (MediaPipe):** Drive the robot and operate the gripper using hand gestures in Manual Mode.
-4. **Robot Exclusion Zone:** 130px dynamic barrier to prevent self-detection loops.
-5. **Smart Twin Resolver:** Auto-handles Cyan/Blue lighting overlap.
-6. **Mobile IP Webcam Support:** Use Android cameras via HTTP URLs.
+platformio.ini          ESP32 build config (points at firmware/src)
+firmware/src/           ESP32 firmware: ExpoRedCrObot.ino
+  secrets.example.h     copy to secrets.h and fill in the Wi-Fi name/password
+host/                   Python code that runs on the laptop
+  argos.py              main program: camera, setup clicks, manual + auto modes
+  vision.py             arena warp, robot marker, HSV gem colors (PALETTE)
+  sorter_planner.py     auto state machine: search → grip → deliver → drop
+  robot_link.py         UDP link to the ESP32 (port 4217)
+  gesture_control.py    MediaPipe hand gestures for manual mode
+  camera_stream.py, navigation_math.py, safety.py
+  assets/               robot marker image + MediaPipe hand model
+tools/
+  check_colors.py       test gem color detection on saved photos (no robot)
+  test_roboflow.py      test the Roboflow cloud model on a dataset photo
+data/
+  dataset/raw_images/   arena photos used to train the Roboflow model
+  captures/             frames auto-saved during Auto runs (not in git)
+```
 
 ---
 
 ## 🚀 How to Run
 
 ```bash
-cd Field_Ready_Project
-python3 Final1.py
+.venv/bin/python -m pip install -r host/requirements.txt
+.venv/bin/python host/argos.py --mm-per-pixel <measured value>
 ```
 
+Useful options:
+
+| Option | Meaning |
+|---|---|
+| `--colors crimson,violet` | Colors to sort (default). All six: `crimson,violet,gold,lime,cyan,blue` |
+| `--gripper-distance-px 110` | Gripper center ahead of the marker (default 110) |
+| `--detector roboflow` | Use the Roboflow cloud model (needs `ROBOFLOW_API_KEY`) instead of local HSV |
+| `--robot-ip 10.218.230.31` | Robot IP if the hotspot blocks broadcast discovery |
+| `--scan-cameras` / `--check-robot` | Check the camera or the robot link without moving |
+
 ### Setup Steps
-1. **STEP 1:** Click 4 corners for homography.
-2. **STEP 2:** Click 6 colored drop zones.
-3. **READY:** Press `Spacebar` to start Auto Mode, or `M` to drive via Gestures/Keyboard!
+1. **STEP 1:** Click the 4 arena corners.
+2. **STEP 2:** Click the center of each active drop circle (right now: red and violet).
+3. **READY:** Press `Spacebar` for Auto Mode, or `M` for gesture control.
+
+### Test colors without the robot
+
+```bash
+.venv/bin/python tools/check_colors.py data/captures/raw/*.jpg
+```
+
+Writes annotated images to `data/color_check/`.
+
+### Firmware
+
+Copy `firmware/src/secrets.example.h` to `firmware/src/secrets.h`, fill in the Wi-Fi details, then build/upload with PlatformIO from the project root.
 
 ---
 
 ## ⌨️ Hotkeys
 - `Spacebar` : Start / Stop Auto Mode
-- `[` / `]` : Adjust Brightness
-- `Q` : Quit Program
-- `R` : Reset Corners
-- `M` : Toggle Manual Mode (Enables Hand Gesture control)
+- `[` / `]` : Adjust brightness (clears drop-circle marks)
+- `Z` : Re-mark drop circles · `R` : Reset corners and circles
+- `H` : Save home position · `B` : Return home and restart
+- `M` : Toggle Manual Mode (hand gesture control)
+- `Q` : Quit

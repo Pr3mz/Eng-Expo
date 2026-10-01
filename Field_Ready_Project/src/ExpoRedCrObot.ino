@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <InEngMotor.h>
 #include <TFT_eSPI.h>
 #include <esp_arduino_version.h>
 #include <cstring>
@@ -24,23 +25,13 @@ namespace
   // Isolate this firmware from the older controller still sending M packets to 4210.
   constexpr uint16_t UDP_PORT = 4217;
   constexpr uint8_t ROBOT_MARKER_ID = 34;
-  // Match the X-ROVER motor library's physical pin order and left-wheel inversion.
-  constexpr uint8_t LEFT_IN1 = 26;
-  constexpr uint8_t LEFT_IN2 = 27;
-  constexpr uint8_t RIGHT_IN1 = 16;
-  constexpr uint8_t RIGHT_IN2 = 17;
-  constexpr uint8_t LEFT_CH1 = 0;
-  constexpr uint8_t LEFT_CH2 = 1;
-  constexpr uint8_t RIGHT_CH1 = 2;
-  constexpr uint8_t RIGHT_CH2 = 3;
-  constexpr uint32_t MOTOR_PWM_HZ = 20000;
-  constexpr uint8_t MOTOR_PWM_BITS = 8;
+
   constexpr uint8_t SERVO_PIN = 19;
   constexpr uint8_t SERVO_CHANNEL = 4;
   constexpr uint32_t SERVO_HZ = 50;
   constexpr uint8_t SERVO_BITS = 16;
-  constexpr uint16_t SERVO_OPEN_US = 500;   // 0 degrees (Open)
-  constexpr uint16_t SERVO_CLOSE_US = 2500; // 180 degrees (Close)
+  constexpr uint16_t SERVO_OPEN_US = 900;   // 0 degrees (Open)
+  constexpr uint16_t SERVO_CLOSE_US = 2300; // ~180 degrees (Close) - more grip force
   constexpr int MAX_DRIVE = 150;
   constexpr int TURN_SPEED = 145;
   constexpr int ACCEL_STEP = 25;
@@ -68,60 +59,11 @@ namespace
   char statusLine[24] = "";
   char packet[64];
 
-  bool attachMotorPwm()
-  {
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    const bool l1 = ledcAttachChannel(LEFT_IN1, MOTOR_PWM_HZ, MOTOR_PWM_BITS, LEFT_CH1);
-    const bool l2 = ledcAttachChannel(LEFT_IN2, MOTOR_PWM_HZ, MOTOR_PWM_BITS, LEFT_CH2);
-    const bool r1 = ledcAttachChannel(RIGHT_IN1, MOTOR_PWM_HZ, MOTOR_PWM_BITS, RIGHT_CH1);
-    const bool r2 = ledcAttachChannel(RIGHT_IN2, MOTOR_PWM_HZ, MOTOR_PWM_BITS, RIGHT_CH2);
-    return l1 && l2 && r1 && r2;
-#else
-    const bool l1 = ledcSetup(LEFT_CH1, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    const bool l2 = ledcSetup(LEFT_CH2, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    const bool r1 = ledcSetup(RIGHT_CH1, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    const bool r2 = ledcSetup(RIGHT_CH2, MOTOR_PWM_HZ, MOTOR_PWM_BITS) > 0;
-    ledcAttachPin(LEFT_IN1, LEFT_CH1);
-    ledcAttachPin(LEFT_IN2, LEFT_CH2);
-    ledcAttachPin(RIGHT_IN1, RIGHT_CH1);
-    ledcAttachPin(RIGHT_IN2, RIGHT_CH2);
-    return l1 && l2 && r1 && r2;
-#endif
-  }
-
-  void writeMotorPwm(uint8_t pin, uint8_t channel, int duty)
-  {
-    duty = constrain(duty, 0, 255);
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    ledcWrite(pin, duty);
-#else
-    ledcWrite(channel, duty);
-#endif
-  }
-
-  void setOneMotor(int in1, int in2, uint8_t ch1, uint8_t ch2, int speed, bool inverted)
-  {
-    speed = constrain(speed, -255, 255);
-    if (inverted)
-      speed = -speed;
-    if (speed >= 0)
-    {
-      writeMotorPwm(in1, ch1, speed);
-      writeMotorPwm(in2, ch2, 0);
-    }
-    else
-    {
-      writeMotorPwm(in1, ch1, 0);
-      writeMotorPwm(in2, ch2, -speed);
-    }
-  }
-
   void driveWheels(int left, int right)
   {
     if (!motorsReady)
       return;
-    setOneMotor(LEFT_IN1, LEFT_IN2, LEFT_CH1, LEFT_CH2, left, true);
-    setOneMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_CH1, RIGHT_CH2, right, false);
+    inengmotor.drive(left, right);
   }
 
   void showStatus(const char *line)
@@ -339,14 +281,21 @@ namespace
     if (millis() - lastMotorUpdate < MOTOR_UPDATE_MS)
       return;
     lastMotorUpdate = millis();
+    
+    // Use a larger step for stopping to make it fast but still slightly smooth
+    int stepLeft = (targetLeft == 0) ? 100 : ACCEL_STEP;
+    int stepRight = (targetRight == 0) ? 100 : ACCEL_STEP;
+
     if (currentLeft < targetLeft)
-      currentLeft = min(currentLeft + ACCEL_STEP, targetLeft);
+      currentLeft = min(currentLeft + stepLeft, targetLeft);
     else if (currentLeft > targetLeft)
-      currentLeft = max(currentLeft - ACCEL_STEP, targetLeft);
+      currentLeft = max(currentLeft - stepLeft, targetLeft);
+      
     if (currentRight < targetRight)
-      currentRight = min(currentRight + ACCEL_STEP, targetRight);
+      currentRight = min(currentRight + stepRight, targetRight);
     else if (currentRight > targetRight)
-      currentRight = max(currentRight - ACCEL_STEP, targetRight);
+      currentRight = max(currentRight - stepRight, targetRight);
+      
     driveWheels(currentLeft, currentRight);
   }
 } // namespace
@@ -359,13 +308,9 @@ void setup()
   screenReady = true;
   showStatus("Booting - stopped");
 
-  motorsReady = attachMotorPwm();
+  inengmotor.begin();
+  motorsReady = true;
   stopNow();
-  if (!motorsReady)
-  {
-    Serial.println("Motor PWM attach failed; wheel commands are disabled.");
-    showStatus("Motor PWM error");
-  }
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   servoReady = ledcAttachChannel(SERVO_PIN, SERVO_HZ, SERVO_BITS, SERVO_CHANNEL);
 #else
@@ -373,9 +318,12 @@ void setup()
   ledcAttachPin(SERVO_PIN, SERVO_CHANNEL);
   servoReady = true;
 #endif
-  // Do not send a servo pulse at boot. This avoids an unexpected gripper move.
-  if (!servoReady)
+  if (!servoReady) {
     Serial.println("Servo PWM unavailable; wheel controls remain available.");
+  } else {
+    // Reset motor to 0 angle (Open position) every time program starts
+    setGrip(false); 
+  }
   connectWifi();
 }
 

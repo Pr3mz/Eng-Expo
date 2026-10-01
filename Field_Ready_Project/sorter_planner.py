@@ -82,17 +82,17 @@ class SorterPlanner:
         if pose is None:
             return PlanDecision("S", "STOP: robot marker not visible", phase=self.phase)
         if any(color not in zones for color in PALETTE):
-            return PlanDecision("S", f"STOP: set drop circles ({len(zones)}/6)", phase=self.phase)
+            return PlanDecision("S", f"STOP: set drop circles ({len(zones)}/{len(PALETTE)})", phase=self.phase)
         if mm_per_pixel is None or not math.isfinite(mm_per_pixel) or mm_per_pixel <= 0:
             return PlanDecision("S", "STOP: measured scale not configured", phase=self.phase)
 
         if self.phase == "grip":
             if now < self.action_deadline:
-                return PlanDecision("S", "GRIP: holding position", phase=self.phase)
+                return PlanDecision("S", "GRIP: holding position", action="CLOSE", phase=self.phase)
             self.phase = "deliver"
         elif self.phase == "drop":
             if now < self.action_deadline:
-                return PlanDecision("S", "DROP: releasing at destination", phase=self.phase)
+                return PlanDecision("S", "DROP: releasing at destination", action="OPEN", phase=self.phase)
             self.phase = "retreat"
             self.action_deadline = now + self.retreat_dwell_s
             return PlanDecision("B", "RETREAT: backing up from drop zone", phase=self.phase)

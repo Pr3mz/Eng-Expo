@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 
-PALETTE = ("violet", "cyan", "crimson", "gold", "blue", "lime")
+PALETTE = ("crimson", "lime")
 COLOR_HUE_RANGES = {
     "crimson": ((0, 10), (170, 179)),
     "gold": ((11, 28),),
@@ -326,7 +326,7 @@ def detect_gems(
 _RF_CLIENT = None
 RF_API_KEY   = "X5wKaATp2EknpnzoIAqF"
 RF_WORKSPACE = "premsupthaksina1-gmail-com"
-RF_WORKFLOW  = "arena-gemstone-color-detector"
+RF_WORKFLOW  = "arena-gemstone-rover-detections-1790759099763"
 RF_QUERY_W   = 640
 RF_QUERY_H   = 480
 

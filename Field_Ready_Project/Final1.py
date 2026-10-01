@@ -425,10 +425,16 @@ def check_robot_link(marker_id: int, robot_ip: str | None = None) -> int:
         link.close()
 
 
-def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOWN"):
+def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOWN", manual_mode=False, manual_command="", gesture_is_grabbed=False):
     # Determine the clean UI state based on setup progress
     lines = orig_lines
-    if setup is not None:
+    if manual_mode:
+        lines = [
+            "MANUAL MODE (GESTURE CONTROL v1.3.0)",
+            "Gestures: 5+5=FWD  I+M+P=REV  4L=LEFT  4R=RIGHT  L-shape=SERVO",
+            f"Command: {manual_command} | Gripper: {'CLOSED' if gesture_is_grabbed else 'OPEN'} | [ SPACEBAR ] to AUTO",
+        ]
+    elif setup is not None:
         if setup.homography is None:
             lines = [
                 f"STEP 1: SETUP ARENA CORNERS ({len(setup.corners)}/4)",
@@ -616,6 +622,7 @@ def main():
     manual_mode = False
     planner = SorterPlanner()
     manual_command = "S"
+    move_start_time = 0.0
     manual_deadline = 0.0
     stable_pose_frames = 0
     pose_misses = 0
@@ -663,7 +670,8 @@ def main():
                 else:
                     reason = f"CAMERA STALE ({frame_age:.1f}s): auto disarmed"
                 draw_status(view, [reason, f"Robot: {link.status}",
-                                   f"Exposure {camera_exposure:g} | [ darker | ] brighter | Q quit"], setup=setup, auto_enabled=auto_enabled, phase=planner.phase)
+                           f"AI Phase: {planner.phase}",
+                           f"Exposure {camera_exposure:g} | [ darker | ] brighter | Q quit"], setup=setup, auto_enabled=auto_enabled, phase=planner.phase, manual_mode=manual_mode, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
                 cv2.imshow(window, view)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -684,7 +692,7 @@ def main():
                 manual_command = "S"
                 view = raw.copy()
                 draw_status(view, ["CAMERA BLACK: movement disabled", f"Exposure {camera_exposure:g} | [ darker | ] brighter",
-                                   "Adjust exposure or set --camera-exposure at launch | Q quit"], setup=setup, auto_enabled=auto_enabled, phase=planner.phase)
+                                   "Adjust exposure or set --camera-exposure at launch | Q quit"], setup=setup, auto_enabled=auto_enabled, phase=planner.phase, manual_mode=manual_mode, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
                 cv2.imshow(window, view)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -695,6 +703,52 @@ def main():
                     change_exposure(1)
                 continue
             raw_view = raw.copy()
+            
+            if manual_mode and setup.homography is not None:
+                link.discover()  # Keep discovering/polling so robot stays connected
+                if gesture_controller:
+                    cmd, gesture_is_grabbed = gesture_controller.process_frame(raw_view, gesture_is_grabbed)
+                    
+                    # Track when movement direction changes for acceleration
+                    if cmd in ('F', 'B', 'L', 'R'):
+                        if cmd != manual_command:
+                            move_start_time = time.monotonic()
+                        manual_command = cmd
+                        manual_deadline = time.monotonic() + 0.3
+                        
+                        # Acceleration: ramp from 140 to 200 over 3 seconds
+                        elapsed = time.monotonic() - move_start_time
+                        current_speed = int(140 + (200 - 140) * min(1.0, elapsed / 3.0))
+                        
+                        link.drive(manual_command, speed=current_speed)
+                    elif cmd in ('C', 'O'):
+                        manual_command = cmd
+                        link.send("CLOSE" if cmd == 'C' else "OPEN")
+                    else:
+                        # Gesture is 'S' or no hands — STOP immediately
+                        if manual_command != 'S':
+                            manual_command = 'S'
+                            if link.robot_ip:
+                                link.sock.sendto(b"STOP", (link.robot_ip, link.port))
+                                link.last_command = "STOP"
+                        # Keep sending stop to make sure it arrives
+                        elif time.monotonic() - getattr(link, '_last_stop', 0) > 0.1:
+                            if link.robot_ip:
+                                link.sock.sendto(b"STOP", (link.robot_ip, link.port))
+                            link._last_stop = time.monotonic()
+                        
+                draw_status(raw_view, [], setup=setup, auto_enabled=False, manual_mode=True, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
+                cv2.imshow(window, raw_view)
+                
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord(' '):
+                    manual_mode = False
+                    auto_start_pending = True
+                    auto_enabled = False
+                elif key == ord('q'):
+                    break
+                continue
+
             for i, point in enumerate(setup.corners):
                 cv2.circle(raw_view, point, 7, (0, 255, 0), -1)
                 cv2.putText(raw_view, str(i + 1), (point[0] + 7, point[1] - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
@@ -712,7 +766,7 @@ def main():
                     f"Robot Status: {link.status}",
                     "Shortcuts: [Q] Quit | [M] Manual Drive Mode"
                 ]
-                draw_status(raw_view, lines, setup=setup, auto_enabled=False)
+                draw_status(raw_view, lines, setup=setup, auto_enabled=False, manual_mode=True, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
                 cv2.imshow(window, raw_view)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -1039,7 +1093,7 @@ def main():
                 f"Robot: {link.status}",
                 f"Auto {'ON' if auto_enabled else 'OFF'} | Manual {'ON' if manual_mode else 'OFF'} | H mark center | B return/restart | Q stop+quit{manual_hint}",
                 f"Exposure {camera_exposure:g} | [ darker | ] brighter | Z remap 6 circles | R reset field",
-            ], setup=setup, auto_enabled=auto_enabled, phase=planner.phase)
+            ], setup=setup, auto_enabled=auto_enabled, phase=planner.phase, manual_mode=manual_mode, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
             
             # --- Auto-capture every 5 seconds ---
             if auto_enabled and (time.monotonic() - last_capture_time >= 5.0):

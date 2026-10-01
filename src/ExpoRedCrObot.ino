@@ -35,13 +35,13 @@ namespace
   constexpr uint8_t RIGHT_CH2 = 3;
   constexpr uint32_t MOTOR_PWM_HZ = 20000;
   constexpr uint8_t MOTOR_PWM_BITS = 8;
-  constexpr uint8_t SERVO_PIN = 19;
+  constexpr uint8_t SERVO_PIN = 32;
   constexpr uint8_t SERVO_CHANNEL = 4;
   constexpr uint32_t SERVO_HZ = 50;
   constexpr uint8_t SERVO_BITS = 16;
   constexpr uint16_t SERVO_OPEN_US = 1100;
   constexpr uint16_t SERVO_CLOSE_US = 1950;
-  constexpr int MAX_DRIVE = 150;
+  constexpr int MAX_DRIVE = 255;
   constexpr int TURN_SPEED = 145;
   constexpr int ACCEL_STEP = 25;
   constexpr uint32_t MOTOR_UPDATE_MS = 10;

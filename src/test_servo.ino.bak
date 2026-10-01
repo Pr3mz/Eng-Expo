@@ -1,0 +1,54 @@
+#include <Arduino.h>
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+#include <hal/ledc_types.h>
+#else
+#include <esp32-hal-ledc.h>
+#endif
+
+const int SERVO_PIN = 32;
+const int SERVO_CHANNEL = 4;
+const int SERVO_HZ = 50;
+const int SERVO_BITS = 16;
+
+// Adjust these if it's hitting the mechanical limit and losing torque
+const int SERVO_OPEN_US = 1100;
+const int SERVO_CLOSE_US = 1950;
+
+void setServoPulse(int pulseUs) {
+  uint32_t duty = (static_cast<uint32_t>(pulseUs) * ((1UL << SERVO_BITS) - 1)) / 20000UL;
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWriteChannel(SERVO_CHANNEL, duty);
+#else
+  ledcWrite(SERVO_CHANNEL, duty);
+#endif
+  Serial.print("Pulsing at ");
+  Serial.print(pulseUs);
+  Serial.print(" us (Duty: ");
+  Serial.print(duty);
+  Serial.println(")");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n--- SERVO ISOLATION TEST ---");
+  Serial.println("Pin: 32 | 50Hz | 16-bit Timer");
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttachChannel(SERVO_PIN, SERVO_HZ, SERVO_BITS, SERVO_CHANNEL);
+#else
+  ledcSetup(SERVO_CHANNEL, SERVO_HZ, SERVO_BITS);
+  ledcAttachPin(SERVO_PIN, SERVO_CHANNEL);
+#endif
+}
+
+void loop() {
+  Serial.println("-> OPENING...");
+  setServoPulse(SERVO_OPEN_US);
+  delay(3000);
+
+  Serial.println("-> CLOSING...");
+  setServoPulse(SERVO_CLOSE_US);
+  delay(3000);
+}

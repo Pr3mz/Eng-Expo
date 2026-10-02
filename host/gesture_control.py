@@ -1,4 +1,5 @@
 import cv2
+import math
 import time
 import mediapipe as mp
 import os
@@ -19,6 +20,8 @@ class GestureController:
         self.start_time = time.time()
         self.last_ts_ms = -1
         self.fist_stop = False
+        self.debug_text = ""      # what the camera reads, shown on screen in manual mode
+        self.min_hand_span = 0.0   # ignore hands smaller than this (fraction of frame height); set by argos.py
         self._switch_armed = True   # gripper switch needs the gesture released between flips
 
     def detect_fingers(self, landmarks, hand_side):
@@ -42,8 +45,8 @@ class GestureController:
 
     def is_thumb_and_pinky(self, f): return f["thumb"] and not f["index"] and not f["middle"] and not f["ring"] and f["pinky"]
     def is_L_shape(self, f): return f["thumb"] and f["index"] and not f["middle"] and not f["ring"] and not f["pinky"]
+    def is_back_pose(self, f): return f["index"] and f["middle"] and not f["ring"] and not f["pinky"]  # index + middle, thumb ignored
     def is_index_pinky(self, f): return f["index"] and f["pinky"] and not f["middle"] and not f["ring"]  # thumb ignored
-    def is_three_fingers(self, f): return not f["thumb"] and not f["index"] and f["middle"] and f["ring"] and f["pinky"]  # middle + ring + pinky
     def is_four_fingers(self, f): return not f["thumb"] and f["index"] and f["middle"] and f["ring"] and f["pinky"]
     def is_five(self, f): return all(f.values())
     def is_fist(self, f): return not any(f.values())   # no fingers up
@@ -71,10 +74,27 @@ class GestureController:
 
         h, w, _ = frame_flipped.shape
 
-        if not res.hand_landmarks:
+        # Keep only the two biggest hands that are big enough: people and hands in
+        # the background must not drive the robot. Size = wrist to middle knuckle.
+        def span(landmarks):
+            return math.hypot((landmarks[9].x - landmarks[0].x) * w, (landmarks[9].y - landmarks[0].y) * h) / h
+
+        candidates = sorted(range(len(res.hand_landmarks)), key=lambda i: -span(res.hand_landmarks[i]))
+        kept = [i for i in candidates if span(res.hand_landmarks[i]) >= self.min_hand_span][:2]
+        ignored = len(res.hand_landmarks) - len(kept)
+        hand_list = [(res.hand_landmarks[i], res.handedness[i][0].category_name) for i in kept]
+        # If both hands get the same label, tell them apart by position (mirrored view:
+        # the hand on the left of the picture is the left hand).
+        sides = ["Right" if label == "Left" else "Left" for _, label in hand_list]
+        if len(hand_list) == 2 and sides[0] == sides[1]:
+            order = sorted(range(2), key=lambda k: hand_list[k][0][0].x)
+            sides[order[0]], sides[order[1]] = "Left", "Right"
+
+        if not hand_list:
             self._switch_armed = True
-        if res.hand_landmarks:
-            for idx, landmarks in enumerate(res.hand_landmarks):
+            self.debug_text = "no hands seen" if not ignored else f"{ignored} small hand(s) ignored (lower Min hand size in G)"
+        if hand_list:
+            for idx, (landmarks, _label) in enumerate(hand_list):
                 # Draw skeleton
                 for conn in self.mp_vision.HandLandmarksConnections.HAND_CONNECTIONS:
                     x1 = int(landmarks[conn.start].x * w)
@@ -85,9 +105,7 @@ class GestureController:
                 for lm in landmarks:
                     cv2.circle(frame_flipped, (int(lm.x * w), int(lm.y * h)), 4, (0, 0, 255), -1)
 
-                # MediaPipe returns mirrored labels — flip them back just like 1.3.0
-                mp_label = res.handedness[idx][0].category_name
-                actual_hand = "Right" if mp_label == "Left" else "Left"
+                actual_hand = sides[idx]
 
                 if actual_hand == "Left" and left_f is None:
                     left_f = self.detect_fingers(landmarks, "Left")
@@ -95,6 +113,10 @@ class GestureController:
                     right_f = self.detect_fingers(landmarks, "Right")
 
             L, R = left_f is not None, right_f is not None
+            names = lambda f: "".join(k for k, n in zip("TIMRP", ("thumb", "index", "middle", "ring", "pinky")) if f[n]) or "fist"
+            sizes = "/".join(f"{span(lm) * 100:.0f}%" for lm, _ in hand_list)
+            self.debug_text = (f"hands:{len(hand_list)} size {sizes}" + (f" (+{ignored} ignored)" if ignored else "") + f"  L:{names(left_f) if L else '-'}  "
+                               f"R:{names(right_f) if R else '-'}  (T I M R P = thumb index middle ring pinky)")
             
             # Gripper works like a switch: index + pinky on EITHER hand flips
             # open <-> closed, and it stays there until the next index + pinky.
@@ -119,7 +141,7 @@ class GestureController:
             # Movement mapping EXACTLY like 1.3.0
             if L and R:
                 if self.is_five(left_f) and self.is_five(right_f): cmd = 'F'
-                elif self.is_three_fingers(left_f) and self.is_three_fingers(right_f): cmd = 'B'
+                elif self.is_back_pose(left_f) and self.is_back_pose(right_f): cmd = 'B'   # index + middle on both hands
                 elif self.is_four_fingers(left_f): cmd = 'L'
                 elif self.is_four_fingers(right_f): cmd = 'R'
             elif L:
@@ -136,6 +158,8 @@ class GestureController:
         # To show the tracking correctly, we must flip it back to match the original camera orientation
         # (Otherwise the user sees a mirrored window, which might conflict with Final1.py's window)
         frame[:] = cv2.flip(frame_flipped, 1)
+        if self.debug_text:
+            self.debug_text += f"  -> {cmd}"
 
         return cmd, new_is_grabbed
 

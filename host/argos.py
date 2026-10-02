@@ -103,7 +103,8 @@ def manual_speed(command: str, held_s: float | None = None) -> int:
     """Manual drive power. Forward/backward use the plain set speed. Turning, with
     `held_s`, ramps from (speed - accel) to (speed + accel) over manual_accel_s
     seconds after the gesture starts: a gentle start that never waits to move."""
-    speed = CFG["manual_turn_speed"] if command in "LR" else CFG["manual_speed"]
+    speed = (CFG["manual_turn_speed"] if command in "LR"
+             else CFG["manual_back_speed"] if command == "B" else CFG["manual_speed"])
     accel = CFG["manual_accel_pwm"] if command in "LR" else 0   # only turning accelerates
     if held_s is not None and accel > 0:
         fraction = min(1.0, max(0.0, held_s / max(0.1, CFG["manual_accel_s"])))
@@ -251,7 +252,9 @@ def run_gripper_simulator(distance_px: float, radius_px: float) -> int:
 
 class ArenaSetup:
     def __init__(self, calibration_path: Path | None = None, camera_index: int = 0, required: int = 4):
-        self.required = required   # number of drop circles that must be marked
+        self.ignore_clicks = False  # True while Manual is on: clicking the window to focus it must not mark anything
+        self.max_sites = required  # most drop circles that can be marked (up to 6)
+        self.required = required   # circles needed now; ENTER finishes early and remembers it
         self.calibration_path = calibration_path
         self.camera_index = camera_index
         self.corners: list[tuple[int, int]] = []
@@ -300,6 +303,9 @@ class ArenaSetup:
             if home_center is not None and (home_center[0] >= WARP_W or home_center[1] >= WARP_H):
                 raise ValueError("home center outside rectified arena")
             self.homography = make_homography(corners, WARP_W, WARP_H) if len(corners) == 4 else None
+            sites = data.get("sites")
+            if isinstance(sites, int) and 1 <= sites <= self.max_sites and len(zones) <= sites:
+                self.required = sites
             self.corners = corners
             self.zones = zones
             self.home_center = home_center
@@ -310,7 +316,7 @@ class ArenaSetup:
     def _save(self):
         if self.calibration_path is None:
             return
-        data = {"version": 1, "camera_index": self.camera_index, "warp_h": WARP_H,
+        data = {"version": 1, "camera_index": self.camera_index, "warp_h": WARP_H, "sites": self.required,
                 "corners": self.corners, "zones": self.zones,
                 "home_center": self.home_center}
         temporary = self.calibration_path.with_name(self.calibration_path.name + ".tmp")
@@ -324,6 +330,7 @@ class ArenaSetup:
         self.corners.clear()
         self.homography = None
         self.zones.clear()
+        self.required = self.max_sites
         self.home_center = None
         self.sample_image = None
         if self.calibration_path is not None:
@@ -343,12 +350,21 @@ class ArenaSetup:
     def clear_zones(self):
         """Clear the color-circle points while retaining arena corners and warp."""
         self.zones.clear()
+        self.required = self.max_sites
         self.sample_image = None
         self._save()
-        print(f"Drop-zone marks cleared; arena corners kept. Click the center of each of the {self.required} drop circles again.")
+        print(f"Drop-zone marks cleared; arena corners kept. Click the center of each drop circle again (up to {self.max_sites}), then press ENTER if you have fewer.")
+
+    def finish_zones(self) -> None:
+        """Accept the circles marked so far (fewer than the maximum) and remember that."""
+        if self.homography is None or not self.zones or len(self.zones) >= self.required:
+            return
+        self.required = len(self.zones)
+        self._save()
+        print(f"Using {self.required} drop circle(s): {', '.join(self.zones)}.", flush=True)
 
     def click(self, event, x, y, _flags, _param):
-        if event != cv2.EVENT_LBUTTONDOWN:
+        if event != cv2.EVENT_LBUTTONDOWN or self.ignore_clicks:
             return
         if self.homography is None:
             self.corners.append((x, y))
@@ -360,7 +376,7 @@ class ArenaSetup:
                     self.corners.clear()
                     self._save()
                     return
-                print(f"Arena rectified. Click the center of each of the {self.required} drop circles (any order; the color is read from the camera).")
+                print(f"Arena rectified. Click the center of each drop circle, up to {self.max_sites} (any order; the color is read from the camera). Press ENTER when all your circles are marked.")
             self._save()
             return
         if len(self.zones) < self.required:
@@ -474,8 +490,8 @@ def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOW
     if manual_mode:
         lines = [
             "MANUAL MODE (GESTURE CONTROL v1.3.0)",
-            "Gestures: both open=FWD  both hands middle+ring+pinky=REV  4 fingers L/R hand=TURN  index+pinky=GRIPPER  fist=STOP",
-            f"Command: {manual_command} | Gripper: {'CLOSED' if gesture_is_grabbed else 'OPEN'} | [ SPACEBAR ] to AUTO",
+            "Gestures: both open=FWD  both hands thumb+index=REV  4 fingers L/R hand=TURN  index+pinky=GRIPPER  fist=STOP",
+            f"Command: {manual_command} | Gripper: {'CLOSED' if gesture_is_grabbed else 'OPEN'} | Keys: W S A D drive, X stop, O C gripper | [SPACE] AUTO",
         ]
     elif setup is not None:
         if setup.homography is None:
@@ -487,8 +503,9 @@ def draw_status(image, orig_lines, setup=None, auto_enabled=False, phase="UNKNOW
         elif len(setup.zones) < setup.required:
             lines = [
                 f"STEP 2: SETUP DROP ZONES ({len(setup.zones)}/{setup.required})",
-                "Click the center of each colored drop circle.",
-                f"Need: {setup.required - len(setup.zones)} more" + (f" | marked: {', '.join(setup.zones)}" if setup.zones else ""),
+                "Click the center of each colored drop circle (up to 6).",
+                (f"Marked: {', '.join(setup.zones)} | press [ENTER] to finish with {len(setup.zones)}" if setup.zones
+                 else f"Need up to {setup.required} circles"),
                 "Shortcuts: [Z] Zones | [R] Reset | [,] Exposure"
             ]
         elif not auto_enabled:
@@ -577,8 +594,8 @@ def main():
                         help="virtual gripper capture/search radius in warped-image pixels")
     parser.add_argument("--colors", default=",".join(vision.PALETTE),
                         help=f"comma list of stone colors to sort (default from ARGOS_COLORS); choose from {', '.join(vision.ALL_COLORS)}")
-    parser.add_argument("--sites", type=int, default=int(os.getenv("ARGOS_SITES", "4")),
-                        help="number of drop circles on the field (the colors of the circles you click are the colors that get sorted)")
+    parser.add_argument("--sites", type=int, default=int(os.getenv("ARGOS_SITES", "6")),
+                        help="most drop circles you can mark, 1-6 (default 6; press ENTER during setup to finish with fewer)")
     parser.add_argument("--no-gripper", action="store_true",
                         help="test driving without the gripper servo: no servo commands, each stone is visited once")
     parser.add_argument("--detector", choices=("hsv", "roboflow"), default=os.getenv("ARGOS_DETECTOR", "hsv"),
@@ -611,12 +628,12 @@ def main():
         vision.set_palette(tuple(args.colors.split(",")))
     except ValueError as exc:
         parser.error(str(exc))
-    if args.sites < 1:
-        parser.error("--sites must be at least 1")
+    if not 1 <= args.sites <= 6:
+        parser.error("--sites must be between 1 and 6")
     if args.detector == "roboflow" and not vision.RF_API_KEY:
         print("[RF] ROBOFLOW_API_KEY is not set; using local HSV detection instead.", flush=True)
         args.detector = "hsv"
-    print(f"Drop circles: {args.sites} | detector: {args.detector}" + (" | NO GRIPPER (servo commands off)" if args.no_gripper else ""))
+    print(f"Drop circles: up to {args.sites} | detector: {args.detector}" + (" | NO GRIPPER (servo commands off)" if args.no_gripper else ""))
     # Force UI-friendly defaults so user can just double-click to run
     args.enable_auto = True
     args.confirm_motion = True
@@ -663,6 +680,9 @@ def main():
     servo_test = {"sent": int(CFG["servo_test_deg"]), "at": 0.0}
     gesture_smoother = GestureSmoother(confirm_frames=1)
     manual_move_start = 0.0
+    gesture_pause_until = 0.0
+    keyboard = {"cmd": None, "until": 0.0, "start": 0.0}   # W/S/A/D fallback while Manual is on
+    gesture_log = {"key": None, "at": 0.0}                 # terminal log of what the camera reads
     ramp = {"mode": None, "at": 0.0}
 
     def sync_ramp() -> None:
@@ -748,7 +768,7 @@ def main():
     os.makedirs(CAPTURE_DIR / "raw", exist_ok=True)
     os.makedirs(CAPTURE_DIR / "annotated", exist_ok=True)
     
-    print(f"Click the four arena corners in the raw camera view. After the warp appears, click the center of each of the {args.sites} drop circles in any order; the color is read from the camera.")
+    print(f"Click the four arena corners in the raw camera view. After the warp appears, click the center of each drop circle (up to {args.sites}) in any order and press ENTER when done; the color is read from the camera.")
     print("Manual check works before arena calibration: focus this window, press M, use Hand Gestures to drive and toggle gripper.")
     print("Camera setup: [ darker | ] brighter (clears zone marks); Z clears zones only; R clears corners and zones.")
     print("Home: place the stopped rover at field center and press H to save its marker position; press B during Auto to return there and restart. Q/window close stops immediately.")
@@ -825,18 +845,34 @@ def main():
                     change_exposure(1)
                 continue
             raw_view = raw.copy()
+            setup.ignore_clicks = manual_mode
             
             if manual_mode and setup.homography is not None:
                 link.discover()  # Keep discovering/polling so robot stays connected
                 if gesture_controller:
+                    gesture_controller.min_hand_span = CFG["min_hand_size"] / 100.0
                     cmd, gesture_is_grabbed = gesture_controller.process_frame(raw_view, gesture_is_grabbed)
                     now = time.monotonic()
                     if cmd in ('C', 'O'):
                         send_grip(grip_command(cmd == 'C'))   # gripper switch; driving carries on
+                        gesture_pause_until = now + CFG["gesture_cooldown_s"]
                     # Debounced: a one-frame glitch neither starts nor stops the robot.
                     move = gesture_smoother.update(cmd, now, CFG["gesture_hold_s"],
                                                    stop_now=getattr(gesture_controller, "fist_stop", False))
-                    if move != 'S':
+                    # One gesture at a time: when a gesture ends or changes, the next one
+                    # is ignored for a short pause. A fist (stop) is never delayed.
+                    if move != manual_command:
+                        if manual_command != 'S':
+                            gesture_pause_until = now + CFG["gesture_cooldown_s"]
+                        if move != 'S' and now < gesture_pause_until:
+                            move = 'S'
+                    kb_cmd = keyboard["cmd"] if now < keyboard["until"] else None
+                    if move == 'S' and kb_cmd:
+                        # Keyboard fallback (testing / emergency): W S A D, no start delay.
+                        manual_command = kb_cmd
+                        manual_deadline = now + 0.3
+                        link.drive(kb_cmd, speed=manual_speed(kb_cmd, now - keyboard["start"]))
+                    elif move != 'S':
                         if move != manual_command:
                             manual_move_start = now
                         manual_command = move
@@ -862,14 +898,40 @@ def main():
                                 link.sock.sendto(b"STOP", (link.robot_ip, link.port))
                             link._last_stop = time.monotonic()
                         
+                if gesture_controller is not None and gesture_controller.debug_text:
+                    log_key = (cmd, manual_command)
+                    log_now = time.monotonic()
+                    if log_key != gesture_log["key"] and log_now - gesture_log["at"] >= 0.25:
+                        print(f"[GESTURE] read={cmd} -> robot={manual_command} | {gesture_controller.debug_text}", flush=True)
+                        gesture_log["key"], gesture_log["at"] = log_key, log_now
                 setup_panel.poll()
                 sync_servo_test()
                 draw_status(raw_view, [], setup=setup, auto_enabled=False, manual_mode=True, manual_command=manual_command, gesture_is_grabbed=gesture_is_grabbed)
+                if gesture_controller is not None and gesture_controller.debug_text:
+                    cv2.rectangle(raw_view, (0, raw_view.shape[0] - 38), (raw_view.shape[1], raw_view.shape[0]), (0, 0, 0), -1)
+                    cv2.putText(raw_view, gesture_controller.debug_text, (12, raw_view.shape[0] - 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA)
                 cv2.imshow(window, raw_view)
                 
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord('g'), ord('G')):
                     setup_panel.toggle()
+                elif key != 255 and chr(key).lower() in "wsad":
+                    now = time.monotonic()
+                    new_cmd = {"w": "F", "s": "B", "a": "L", "d": "R"}[chr(key).lower()]
+                    if keyboard["cmd"] != new_cmd or now >= keyboard["until"]:
+                        keyboard["start"] = now
+                    keyboard["cmd"], keyboard["until"] = new_cmd, now + 0.6   # covers the key-repeat delay
+                    if now - keyboard.get("logged", 0.0) > 0.5:
+                        print(f"[KEY] {chr(key).upper()} -> {new_cmd}", flush=True)
+                        keyboard["logged"] = now
+                elif key in (ord('x'), ord('X')):
+                    keyboard["cmd"], keyboard["until"] = None, 0.0
+                    gesture_smoother.reset()
+                    link.stop()
+                elif key in (ord('o'), ord('O'), ord('c'), ord('C')):
+                    gesture_is_grabbed = key in (ord('c'), ord('C'))
+                    send_grip(grip_command(gesture_is_grabbed))
                 elif key == ord(' '):
                     manual_mode = False
                     auto_start_pending = True
@@ -1376,6 +1438,8 @@ def main():
                 link.stop()
             elif key in (ord("g"), ord("G")):
                 setup_panel.toggle()
+            elif key in (10, 13):
+                setup.finish_zones()
             elif key == ord("r"):
                 link.stop()
                 auto_enabled = False
